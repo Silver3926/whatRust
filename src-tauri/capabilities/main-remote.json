@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-remote",
+  "description": "Let the WhatsApp Web page call whatRust's notify/set_unread and the notification plugin.",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["https://web.whatsapp.com/*"]
+  },
+  "permissions": ["core:default", "notification:default"]
+}

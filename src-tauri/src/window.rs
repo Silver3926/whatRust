@@ -30,7 +30,36 @@ pub fn create_main_window(app: &AppHandle, start_hidden: bool) -> tauri::Result<
             }
         }
     });
+
+    enable_webview_media(&win);
     Ok(win)
+}
+
+/// Grant microphone/camera + WebRTC to WhatsApp Web. The system webview denies
+/// getUserMedia by default, which blocks voice messages and calls (the
+/// "Allow microphone" prompt). We enable the media settings and auto-approve
+/// the webview's permission requests for the WhatsApp window.
+fn enable_webview_media(win: &WebviewWindow) {
+    #[cfg(target_os = "linux")]
+    {
+        use webkit2gtk::glib::prelude::ObjectExt;
+        use webkit2gtk::{PermissionRequestExt, WebViewExt};
+        let _ = win.with_webview(|webview| {
+            let wv = webview.inner();
+            if let Some(settings) = WebViewExt::settings(&wv) {
+                settings.set_property("enable-media-stream", true);
+                settings.set_property("enable-mediasource", true);
+                settings.set_property("enable-webrtc", true);
+                settings.set_property("enable-encrypted-media", true);
+            }
+            wv.connect_permission_request(|_wv, req| {
+                req.allow();
+                true
+            });
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = win;
 }
 
 pub fn show_main(app: &AppHandle) {

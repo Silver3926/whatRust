@@ -108,12 +108,18 @@ async function addAccount() {
     input.value = "";
     await loadAccounts();
   } catch (e) {
-    // macOS < 14: disable add and surface the note.
-    const note = document.getElementById("macos-note");
-    note.textContent = String(e);
-    note.hidden = false;
-    document.getElementById("add_account").disabled = true;
-    document.getElementById("new_account_name").disabled = true;
+    const msg = String(e);
+    // Only the macOS < 14 case is permanent — disable Add and surface the note.
+    // Other failures (disk write, window build) are transient: report and let the user retry.
+    if (msg.includes("macOS 14")) {
+      const note = document.getElementById("macos-note");
+      note.textContent = msg;
+      note.hidden = false;
+      document.getElementById("add_account").disabled = true;
+      document.getElementById("new_account_name").disabled = true;
+    } else {
+      alert(msg);
+    }
   }
 }
 

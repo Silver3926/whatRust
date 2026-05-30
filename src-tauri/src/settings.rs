@@ -48,8 +48,28 @@ pub fn save(app: &AppHandle, s: &Settings) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Apply side effects of settings (autostart + global shortcut). Filled in Task 8.
-pub fn apply(_app: &AppHandle, _s: &Settings) {}
+/// Apply side effects of settings (autostart + global shortcut).
+pub fn apply(app: &AppHandle, s: &Settings) {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        let autostart = app.autolaunch();
+        if s.autostart {
+            let _ = autostart.enable();
+        } else {
+            let _ = autostart.disable();
+        }
+
+        use tauri_plugin_global_shortcut::GlobalShortcutExt;
+        let gs = app.global_shortcut();
+        let _ = gs.unregister_all();
+        if s.hotkey_enabled && !s.hotkey.trim().is_empty() {
+            let _ = gs.register(s.hotkey.as_str());
+        }
+    }
+    #[cfg(not(desktop))]
+    let _ = (app, s);
+}
 
 #[cfg(test)]
 mod tests {

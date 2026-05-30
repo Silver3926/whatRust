@@ -24,7 +24,16 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder
-            .plugin(tauri_plugin_window_state::Builder::default().build())
+            .plugin(
+                // Restore size/position, but NOT visibility — otherwise the plugin
+                // force-shows the window on launch and defeats start-minimized / --minimized.
+                tauri_plugin_window_state::Builder::default()
+                    .with_state_flags(
+                        tauri_plugin_window_state::StateFlags::all()
+                            & !tauri_plugin_window_state::StateFlags::VISIBLE,
+                    )
+                    .build(),
+            )
             .plugin(
                 tauri_plugin_global_shortcut::Builder::new()
                     .with_handler(|app, _shortcut, event| {

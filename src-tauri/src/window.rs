@@ -41,7 +41,7 @@ pub fn show_main(app: &AppHandle) {
     }
 }
 
-/// Opens (or focuses) the local settings window. Fully wired in Task 9.
+/// Opens (or focuses) the local settings window.
 pub fn open_settings_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("settings") {
         let _ = w.show();

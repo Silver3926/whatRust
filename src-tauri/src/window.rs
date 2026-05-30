@@ -61,8 +61,56 @@ fn enable_webview_media(win: &WebviewWindow) {
             });
         });
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = win;
+    #[cfg(target_os = "windows")]
+    {
+        let _ = win.with_webview(enable_media_windows);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // wry already installs a WKUIDelegate that auto-grants requestMediaCapturePermission;
+        // mic/camera are gated only by the Info.plist usage-description keys (see src-tauri/Info.plist).
+        let _ = win;
+    }
+}
+
+/// Windows (WebView2): auto-allow microphone/camera permission requests so WhatsApp
+/// voice messages and calls work without a prompt (and can't be wedged by a prior "Block").
+#[cfg(target_os = "windows")]
+fn enable_media_windows(webview: tauri::webview::PlatformWebview) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2, ICoreWebView2PermissionRequestedEventArgs, COREWEBVIEW2_PERMISSION_KIND,
+        COREWEBVIEW2_PERMISSION_KIND_CAMERA, COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
+        COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+    };
+    use webview2_com::PermissionRequestedEventHandler;
+
+    // SAFETY: with_webview runs on the UI thread where the WebView2 controller lives;
+    // these are standard WebView2 COM calls.
+    unsafe {
+        let controller = webview.controller();
+        let core: ICoreWebView2 = match controller.CoreWebView2() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let handler = PermissionRequestedEventHandler::create(Box::new(
+            move |_wv: Option<ICoreWebView2>,
+                  args: Option<ICoreWebView2PermissionRequestedEventArgs>|
+                  -> windows_core::Result<()> {
+                if let Some(args) = args {
+                    let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
+                    args.PermissionKind(&mut kind)?;
+                    if kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE
+                        || kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
+                    {
+                        args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
+                    }
+                }
+                Ok(())
+            },
+        ));
+        let mut token: i64 = 0;
+        let _ = core.add_PermissionRequested(&handler, &mut token);
+    }
 }
 
 pub fn show_main(app: &AppHandle) {

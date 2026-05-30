@@ -27,6 +27,12 @@ serde_json = "1"
 # Version-matched to wry 0.55's webkit2gtk so PlatformWebview::inner() types unify.
 webkit2gtk = "=2.0.2"
 
+[target.'cfg(windows)'.dependencies]
+# Version-matched to wry 0.55 for the WebView2 PermissionRequested mic/camera handler.
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com"] }
+windows-core = "0.61"
+
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"

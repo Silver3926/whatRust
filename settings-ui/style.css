@@ -24,3 +24,35 @@ button {
 }
 button:hover { filter: brightness(1.05); }
 .note { color: var(--green); font-weight: 600; }
+
+/* --- Accounts manager --- */
+h2 { font-size: 14px; margin: 0 0 10px; font-weight: 600; }
+.section-title { margin-top: 22px; }
+.divider { border: 0; border-top: 1px solid #8883; margin: 18px 0; }
+#accounts-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.account-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border: 1px solid #8884; border-radius: 8px;
+}
+.account-row .acct-name { flex: 1 1 auto; font-size: 13px; }
+.account-row .acct-unread {
+  min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px;
+  background: var(--green); color: #042f1a; font-size: 11px; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.account-row button {
+  padding: 5px 10px; font-size: 12px; font-weight: 600;
+}
+.account-row button.secondary {
+  background: transparent; color: inherit; border: 1px solid #8886;
+}
+.account-row button.secondary:hover { filter: none; background: #8881; }
+.account-row button:disabled { opacity: 0.4; cursor: not-allowed; }
+.add-row { display: flex; gap: 8px; }
+.add-row input {
+  flex: 1 1 auto; padding: 8px 10px; border: 1px solid #8884; border-radius: 8px;
+  background: transparent; color: inherit; font-size: 13px;
+}
+.add-row button:disabled { opacity: 0.4; cursor: not-allowed; }
+.macos-note { color: #c0392b; font-size: 12px; margin: 8px 0 0; }
+.macos-note[hidden] { display: none; }

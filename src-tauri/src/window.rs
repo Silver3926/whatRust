@@ -1,3 +1,4 @@
+use crate::accounts::{self, Account, ActiveAccount};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 /// Recent desktop Chrome UA. WhatsApp Web rejects the default WebKitGTK/Safari UA.
@@ -8,25 +9,44 @@ pub const CHROME_UA: &str =
 const BRIDGE_JS: &str = include_str!("../resources/bridge.js");
 const APP_ICON: &[u8] = include_bytes!("../icons/128x128.png");
 
-pub fn create_main_window(app: &AppHandle, start_hidden: bool) -> tauri::Result<WebviewWindow> {
+/// Open (or focus, if it already exists) the window for `account`. The label is
+/// `wa-<id>`; everything the single-account window carried is preserved (Chrome UA,
+/// `bridge.js`, app icon, sizes, close-to-tray), plus per-account session isolation
+/// for non-default accounts.
+pub fn open_account_window(
+    app: &AppHandle,
+    account: &Account,
+    start_hidden: bool,
+) -> tauri::Result<WebviewWindow> {
+    let label = accounts::window_label(&account.id);
+
+    // Reuse the existing window if it is already open.
+    if let Some(w) = app.get_webview_window(&label) {
+        return Ok(w);
+    }
+
     let url = "https://web.whatsapp.com/".parse().expect("valid url");
     let icon = tauri::image::Image::from_bytes(APP_ICON)?;
-    let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-        .title("whatRust")
+
+    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
+        .title(format!("whatRust — {}", account.name))
         .inner_size(1100.0, 800.0)
         .min_inner_size(560.0, 480.0)
         .icon(icon)?
         .user_agent(CHROME_UA)
         .initialization_script(BRIDGE_JS)
-        .visible(!start_hidden)
-        .build()?;
+        .visible(!start_hidden);
 
+    let builder = apply_isolation(builder, account, app);
+    let win = builder.build()?;
+
+    // Close-to-tray (reads the live setting so the toggle takes effect without a restart).
     let app_handle = app.clone();
+    let label_for_close = label.clone();
     win.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-            // Re-read settings so the toggle takes effect without a restart.
             if crate::settings::load(&app_handle).close_to_tray {
-                if let Some(w) = app_handle.get_webview_window("main") {
+                if let Some(w) = app_handle.get_webview_window(&label_for_close) {
                     let _ = w.hide();
                 }
                 api.prevent_close();
@@ -34,8 +54,94 @@ pub fn create_main_window(app: &AppHandle, start_hidden: bool) -> tauri::Result<
         }
     });
 
+    register_focus_listener(app, &win);
     enable_webview_media(&win);
     Ok(win)
+}
+
+/// Track the last-focused account window in `ActiveAccount`. Registered once per
+/// window inside `open_account_window`, so startup *and* dynamically-added windows
+/// get it exactly once.
+fn register_focus_listener(app: &AppHandle, win: &WebviewWindow) {
+    let app_handle = app.clone();
+    let label = win.label().to_string();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::Focused(true) = event {
+            if let Some(active) = app_handle.try_state::<ActiveAccount>() {
+                *active.lock().unwrap() = label.clone();
+            }
+        }
+    });
+}
+
+/// Apply per-account session isolation to a window builder.
+///
+/// The `default` account uses the default webview store (no override) so the
+/// pre-multi-account login is preserved. Additional accounts get an isolated store:
+/// `data_directory` on Linux/Windows, `data_store_identifier` (the persisted v4 UUID)
+/// on macOS. `data_directory`/`data_store_identifier` compile on every platform in
+/// tauri; only *which* one is called is cfg-gated, with a `compile_error!()` catch-all
+/// so a future platform can't silently skip isolation.
+fn apply_isolation<'a>(
+    builder: WebviewWindowBuilder<'a, tauri::Wry, tauri::AppHandle<tauri::Wry>>,
+    account: &Account,
+    app: &AppHandle,
+) -> WebviewWindowBuilder<'a, tauri::Wry, tauri::AppHandle<tauri::Wry>> {
+    // The default account always uses the shared default store.
+    if account.id == "default" {
+        return builder;
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    {
+        let _ = app;
+        if let Ok(dir) = accounts::profile_dir(app, &account.id) {
+            let _ = std::fs::create_dir_all(&dir);
+            return builder.data_directory(dir);
+        }
+        builder
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        // Non-default accounts carry a persisted, non-nil v4 UUID. Fall back to a
+        // freshly generated non-nil UUID rather than risk the nil-UUID exception.
+        let uuid = account
+            .store_uuid
+            .unwrap_or_else(accounts::gen_store_uuid);
+        builder.data_store_identifier(uuid)
+    }
+    #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
+    {
+        let _ = (builder, account, app);
+        compile_error!("per-account session isolation is not implemented for this platform");
+    }
+}
+
+/// Whether the platform can isolate additional accounts. macOS needs >= 14 for
+/// `data_store_identifier`. Linux/Windows always can. Returns an `Err` message
+/// suitable for surfacing in the Accounts UI.
+pub fn ensure_isolation_supported() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_foundation::{NSOperatingSystemVersion, NSProcessInfo};
+        // data_store_identifier requires macOS >= 14.
+        let required = NSOperatingSystemVersion {
+            majorVersion: 14,
+            minorVersion: 0,
+            patchVersion: 0,
+        };
+        let ok = NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(required);
+        if ok {
+            Ok(())
+        } else {
+            Err("Multiple accounts require macOS 14 or newer.".into())
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(())
+    }
 }
 
 /// Grant microphone/camera + WebRTC to WhatsApp Web. The system webview denies
@@ -113,12 +219,46 @@ fn enable_media_windows(webview: tauri::webview::PlatformWebview) {
     }
 }
 
-pub fn show_main(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
+/// Show + unminimize + focus an account window by its `wa-<id>` label.
+pub fn show_account(app: &AppHandle, label: &str) {
+    if let Some(w) = app.get_webview_window(label) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
     }
+}
+
+/// Show the active (last-focused) account window. Falls back to the first existing
+/// account window, then the settings window.
+pub fn show_active(app: &AppHandle) {
+    if let Some(active) = app.try_state::<ActiveAccount>() {
+        let label = active.lock().unwrap().clone();
+        if app.get_webview_window(&label).is_some() {
+            show_account(app, &label);
+            return;
+        }
+    }
+    // Fall back to any account window.
+    if let Some(label) = app
+        .webview_windows()
+        .keys()
+        .find(|l| l.starts_with("wa-"))
+        .cloned()
+    {
+        show_account(app, &label);
+        return;
+    }
+    // Last resort: the settings window.
+    if let Some(w) = app.get_webview_window("settings") {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+/// Backwards-compatible shim: single-instance + macOS Reopen call this; it now
+/// targets the active account.
+pub fn show_main(app: &AppHandle) {
+    show_active(app);
 }
 
 /// Opens (or focuses) the local settings window.
@@ -130,7 +270,7 @@ pub fn open_settings_window(app: &AppHandle) {
     }
     let _ = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
         .title("whatRust — Settings")
-        .inner_size(440.0, 560.0)
+        .inner_size(440.0, 680.0)
         .resizable(false)
         .build();
 }

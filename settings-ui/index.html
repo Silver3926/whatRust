@@ -9,6 +9,18 @@
   <body>
     <h1>whatRust Settings</h1>
 
+    <h2>Accounts</h2>
+    <div id="accounts-list"></div>
+    <div class="add-row">
+      <input type="text" id="new_account_name" placeholder="New account name" />
+      <button id="add_account">+ Add account</button>
+    </div>
+    <p id="macos-note" class="macos-note" hidden>Multiple accounts require macOS 14 or newer.</p>
+
+    <hr class="divider" />
+
+    <h2 class="section-title">Preferences</h2>
+
     <label class="row"><input type="checkbox" id="close_to_tray" /> <span>Close to tray (keep running in background)</span></label>
     <label class="row"><input type="checkbox" id="start_minimized" /> <span>Start minimized to tray</span></label>
     <label class="row"><input type="checkbox" id="autostart" /> <span>Launch at system startup</span></label>

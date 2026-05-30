@@ -6,13 +6,16 @@ pub const CHROME_UA: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 const BRIDGE_JS: &str = include_str!("../resources/bridge.js");
+const APP_ICON: &[u8] = include_bytes!("../icons/128x128.png");
 
 pub fn create_main_window(app: &AppHandle, start_hidden: bool) -> tauri::Result<WebviewWindow> {
     let url = "https://web.whatsapp.com/".parse().expect("valid url");
+    let icon = tauri::image::Image::from_bytes(APP_ICON)?;
     let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
         .title("whatRust")
         .inner_size(1100.0, 800.0)
         .min_inner_size(560.0, 480.0)
+        .icon(icon)?
         .user_agent(CHROME_UA)
         .initialization_script(BRIDGE_JS)
         .visible(!start_hidden)

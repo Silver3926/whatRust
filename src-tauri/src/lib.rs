@@ -14,8 +14,12 @@ pub fn run() {
     // single-instance MUST be registered first.
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            window::show_main(app);
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // A 2nd launch normally raises the window — but NOT an autostart
+            // relaunch carrying --minimized (keep it hidden in the tray).
+            if !args.iter().any(|a| a == "--minimized") {
+                window::show_main(app);
+            }
         }));
     }
 
@@ -74,6 +78,16 @@ pub fn run() {
             settings::apply(handle, &s);
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running whatRust");
+        .build(tauri::generate_context!())
+        .expect("error while building whatRust")
+        .run(|_app_handle, _event| {
+            // macOS: clicking the dock icon after hide-to-tray re-shows the window
+            // (otherwise the app is only reachable via the menu-bar tray icon).
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = &_event {
+                if !*has_visible_windows {
+                    window::show_main(_app_handle);
+                }
+            }
+        });
 }

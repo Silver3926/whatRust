@@ -9,14 +9,28 @@ const BRIDGE_JS: &str = include_str!("../resources/bridge.js");
 
 pub fn create_main_window(app: &AppHandle, start_hidden: bool) -> tauri::Result<WebviewWindow> {
     let url = "https://web.whatsapp.com/".parse().expect("valid url");
-    WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+    let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
         .title("whatRust")
         .inner_size(1100.0, 800.0)
         .min_inner_size(560.0, 480.0)
         .user_agent(CHROME_UA)
         .initialization_script(BRIDGE_JS)
         .visible(!start_hidden)
-        .build()
+        .build()?;
+
+    let app_handle = app.clone();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            // Re-read settings so the toggle takes effect without a restart.
+            if crate::settings::load(&app_handle).close_to_tray {
+                if let Some(w) = app_handle.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+                api.prevent_close();
+            }
+        }
+    });
+    Ok(win)
 }
 
 pub fn show_main(app: &AppHandle) {

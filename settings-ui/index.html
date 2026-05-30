@@ -1,1 +1,30 @@
-<!doctype html><meta charset=utf-8><title>whatRust</title>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>whatRust — Settings</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <h1>whatRust Settings</h1>
+
+    <label class="row"><input type="checkbox" id="close_to_tray" /> <span>Close to tray (keep running in background)</span></label>
+    <label class="row"><input type="checkbox" id="start_minimized" /> <span>Start minimized to tray</span></label>
+    <label class="row"><input type="checkbox" id="autostart" /> <span>Launch at system startup</span></label>
+    <label class="row"><input type="checkbox" id="notifications" /> <span>Native notifications</span></label>
+    <label class="row"><input type="checkbox" id="hotkey_enabled" /> <span>Enable global show/hide shortcut</span></label>
+
+    <label class="field">
+      <span>Shortcut</span>
+      <input type="text" id="hotkey" placeholder="CmdOrCtrl+Shift+W" />
+    </label>
+
+    <div class="actions">
+      <button id="save">Save</button>
+      <span id="note" class="note"></span>
+    </div>
+
+    <script src="main.js"></script>
+  </body>
+</html>

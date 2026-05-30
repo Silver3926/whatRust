@@ -8,37 +8,38 @@
 
 ![Latest release](https://img.shields.io/github/v/release/karem505/whatRust?label=release)
 ![License: MIT](https://img.shields.io/github/license/karem505/whatRust)
-![Platforms: Linux | Windows | macOS](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS-informational)
-![Built with Rust + Tauri v2](https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri%20v2-orange)
+![Platforms: Linux, Windows, macOS](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS-informational)
+![Built with Rust and Tauri v2](https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri%20v2-orange)
 ![GitHub stars](https://img.shields.io/github/stars/karem505/whatRust?style=social)
 
 > **Unofficial, independent project** — not affiliated with, endorsed by, or sponsored by WhatsApp or Meta. whatRust simply loads the official `web.whatsapp.com` interface in a native system webview.
 
-## Install (one line)
+## Contents
 
-**Linux / macOS**
-```bash
-curl -fsSL https://raw.githubusercontent.com/karem505/whatRust/master/install.sh | sh
-```
-
-**Windows** (PowerShell)
-```powershell
-irm https://raw.githubusercontent.com/karem505/whatRust/master/install.ps1 | iex
-```
-
-These download the latest release for your OS (AppImage/`.deb` on Linux, `.dmg` on macOS, NSIS/MSI on Windows) — no build toolchain required. Prefer a manual download? Grab an installer from the [latest release](https://github.com/karem505/whatRust/releases/latest).
+- [What is whatRust?](#what-is-whatrust)
+- [Why whatRust? A low-RAM WhatsApp Desktop alternative](#why-whatrust-a-low-ram-whatsapp-desktop-alternative)
+- [Features](#features)
+- [whatRust vs the official WhatsApp Desktop (Electron)](#whatrust-vs-the-official-whatsapp-desktop-electron)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Getting started](#getting-started)
+- [FAQ](#faq)
+- [Limitations](#limitations)
+- [Contributing](#contributing)
+- [Disclaimer](#disclaimer)
+- [License](#license)
 
 ## What is whatRust?
 
-whatRust is an open-source **WhatsApp Web desktop client** for Linux, Windows, and macOS. It wraps the official `web.whatsapp.com` in your operating system's native webview and adds the desktop conveniences the browser tab can't — a system tray, native notifications, persistent login, global shortcuts, and microphone/camera access for voice messages and calls.
+whatRust is an open-source **WhatsApp Web desktop client** for Linux, Windows, and macOS. It wraps the official `web.whatsapp.com` in your operating system's native webview and adds the desktop conveniences a browser tab can't — a system tray, native notifications, persistent login, global shortcuts, and microphone/camera access for voice messages and calls.
 
-It is an **unofficial WhatsApp client** and a practical **WhatsApp Desktop alternative** for people who want a fast, low-memory app instead of the heavier official build. It is not affiliated with WhatsApp or Meta.
+It is an **unofficial, open-source WhatsApp client** and a practical **WhatsApp Desktop alternative** for people who want a fast, low-memory app instead of the heavier official build. It is not affiliated with WhatsApp or Meta.
 
-## Why whatRust? (lightweight, low-RAM WhatsApp desktop)
+## Why whatRust? A low-RAM WhatsApp Desktop alternative
 
-The official WhatsApp Desktop app is built on Electron, which bundles an entire Chromium browser engine inside every app. whatRust instead reuses the webview that already ships with your OS — **WebKitGTK** on Linux, **WebView2** on Windows, and **WKWebView** on macOS — via [Tauri v2](https://tauri.app).
+Because it reuses the webview that already ships with your OS instead of bundling its own browser engine, **whatRust typically idles at a small fraction of the memory the Electron-based WhatsApp Desktop uses** — often several times lower, depending on your OS and usage.
 
-Because it doesn't ship a second browser engine, whatRust typically idles at a small **fraction of the memory** the Electron-based WhatsApp Desktop uses — often several times lower, depending on your OS and usage. The result is a **lightweight, low-RAM WhatsApp desktop app** that starts fast and stays out of the way.
+The official WhatsApp Desktop app is built on Electron, which packs an entire Chromium browser inside every app. whatRust instead renders WhatsApp Web through the OS-native webview — **WebKitGTK** on Linux, **WebView2** on Windows, and **WKWebView** on macOS — via [Tauri v2](https://tauri.app). The result is a lightweight, low-RAM WhatsApp desktop app that starts fast and stays out of the way.
 
 ## Features
 
@@ -71,27 +72,33 @@ Because it doesn't ship a second browser engine, whatRust typically idles at a s
 | Launch at startup | ✅ Yes | ✅ Yes |
 | Affiliated with Meta | ❌ No (unofficial) | ✅ Yes |
 
+## Requirements
+
+| OS | Webview engine | Notes |
+|---|---|---|
+| **Linux** | WebKitGTK | Requires WebKitGTK **≥ 2.46.1** (older versions hang WhatsApp's QR login). AppImage may need `libfuse2`. |
+| **Windows 10/11** | WebView2 | Uses the Evergreen WebView2 runtime (preinstalled on Windows 11). |
+| **macOS** | WKWebView | macOS 12+; the current build is Apple Silicon (arm64). |
+
 ## Installation
 
-### Linux (one-line install)
+**Linux / macOS** — one line:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/karem505/whatRust/master/install.sh | sh
 ```
-Installs the AppImage to `~/.local/bin` and adds an application-menu entry. Requires a reasonably recent WebKitGTK (see [Requirements](#requirements--supported-platforms)). `.deb` users can instead download it from the [latest release](https://github.com/karem505/whatRust/releases/latest).
+Installs the AppImage to `~/.local/bin` on Linux (with an application-menu entry), or the `.dmg` app into `/Applications` on macOS (Apple Silicon). The macOS build is unsigned — if it warns on first launch, right-click the app → **Open**.
 
-### Windows (PowerShell one-line install)
+**Windows** — one line (PowerShell):
 ```powershell
 irm https://raw.githubusercontent.com/karem505/whatRust/master/install.ps1 | iex
 ```
-Downloads and runs the latest NSIS installer (`.msi` is also available on the release page).
+Downloads and runs the latest NSIS installer (`.exe`); an `.msi` is also available on the release page.
 
-### macOS
-```bash
-curl -fsSL https://raw.githubusercontent.com/karem505/whatRust/master/install.sh | sh
-```
-Installs the `.dmg` app into `/Applications` (currently Apple Silicon / arm64). The build is unsigned; if macOS warns on first launch, right-click the app → **Open**.
+**Manual download** — grab a `.AppImage`/`.deb`, `.dmg`, `.exe`, or `.msi` from the [latest release](https://github.com/karem505/whatRust/releases/latest).
 
-### Build from source (Rust + Cargo + Tauri CLI)
+<details>
+<summary><b>Build from source</b> (Rust + Cargo + Tauri CLI)</summary>
+
 ```bash
 # Linux build dependencies (Ubuntu/Debian)
 sudo apt install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
@@ -103,21 +110,14 @@ cargo tauri dev      # run in development
 cargo tauri build    # build installers for the current OS
 cd src-tauri && cargo test   # run the unit tests
 ```
+</details>
 
 ## Getting started
 
 1. Launch whatRust. The WhatsApp Web QR screen appears.
 2. On your phone, open **WhatsApp → Linked Devices → Link a Device** and scan the QR code.
-3. You're in. Login persists, so you won't need to scan again on the next launch.
+3. You're in. Login persists, so you won't need to scan again next launch.
 4. Closing the window hides whatRust to the tray (toggle this in Settings). Use the tray icon or the global shortcut to bring it back.
-
-## Requirements / Supported platforms
-
-| OS | Webview engine | Notes |
-|---|---|---|
-| **Linux** | WebKitGTK | Requires WebKitGTK **≥ 2.46.1** (older versions hang WhatsApp's QR login). AppImage may need `libfuse2`. |
-| **Windows 10/11** | WebView2 | Uses the Evergreen WebView2 runtime (preinstalled on Windows 11). |
-| **macOS** | WKWebView | macOS 12+; current build is Apple Silicon (arm64). |
 
 ## FAQ
 
@@ -131,7 +131,7 @@ No. whatRust is unofficial and independent — not affiliated with WhatsApp or M
 whatRust uses your OS's native webview instead of bundling a Chromium engine (as Electron does), which makes it considerably lighter. See the [comparison table](#whatrust-vs-the-official-whatsapp-desktop-electron).
 
 ### Why does whatRust use less RAM than WhatsApp Desktop?
-Because it reuses the system webview rather than shipping a full Chromium runtime, so its idle memory footprint is typically several times lower (approximate — it varies by OS and usage).
+Because it reuses the system webview rather than shipping a full Chromium runtime, its idle memory footprint is typically several times lower (approximate — it varies by OS and usage).
 
 ### Which operating systems does whatRust support?
 Linux (WebKitGTK), Windows 10/11 (WebView2), and macOS 12+ (WKWebView).
@@ -149,17 +149,17 @@ Yes. It adds a system tray icon with an unread-message badge, can close to the t
 No. Login is persistent — scan the QR code once via Linked Devices and you stay signed in across restarts.
 
 ### Is whatRust safe? Does it read my messages?
-whatRust only loads the official `web.whatsapp.com` in a native webview and adds no message-handling layer of its own. It is open source, so the code can be audited.
+whatRust only loads the official `web.whatsapp.com` in a native webview and adds no message-handling layer of its own. It requests only the webview, microphone, and camera access that WhatsApp Web itself needs, and it is open source, so the code can be audited.
 
-## Limitations & notes
+## Limitations
 
 - **Windows unread count**: Windows tray icons ignore text labels, so the unread *number* appears only in the hover tooltip (the icon still switches to a badged variant). macOS and Linux show the count.
 - **Notification click** does not yet focus the window — use the tray icon or the global shortcut.
-- **macOS** builds are unsigned and currently Apple Silicon only.
+- **macOS** builds are unsigned and currently Apple Silicon (arm64) only.
 
 ## Contributing
 
-Contributions are welcome — this is an open-source WhatsApp client. Open an issue or a pull request on [GitHub](https://github.com/karem505/whatRust).
+Contributions to this open-source WhatsApp client are welcome — open an issue or a pull request on [GitHub](https://github.com/karem505/whatRust).
 
 ## Disclaimer
 

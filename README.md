@@ -4,7 +4,7 @@
 
 # whatRust — Lightweight WhatsApp Web Desktop Client (Rust + Tauri)
 
-**whatRust is a free, open-source, lightweight desktop client for WhatsApp Web that runs on Linux, Windows, and macOS — a low-RAM alternative to the official Electron-based WhatsApp Desktop app, built with Rust and Tauri v2.**
+**whatRust is a free, open-source, lightweight desktop client for WhatsApp Web that runs on Linux, Windows, and macOS — a lean, native alternative to the official Electron-based WhatsApp Desktop app, built with Rust and Tauri v2.**
 
 ![Latest release](https://img.shields.io/github/v/release/karem505/whatRust?label=release)
 ![License: MIT](https://img.shields.io/github/license/karem505/whatRust)
@@ -17,7 +17,7 @@
 ## Contents
 
 - [What is whatRust?](#what-is-whatrust)
-- [Why whatRust? A low-RAM WhatsApp Desktop alternative](#why-whatrust-a-low-ram-whatsapp-desktop-alternative)
+- [Why whatRust? A lean, native WhatsApp Desktop alternative](#why-whatrust-a-lean-native-whatsapp-desktop-alternative)
 - [Features](#features)
 - [whatRust vs the official WhatsApp Desktop (Electron)](#whatrust-vs-the-official-whatsapp-desktop-electron)
 - [Requirements](#requirements)
@@ -33,13 +33,15 @@
 
 whatRust is an open-source **WhatsApp Web desktop client** for Linux, Windows, and macOS. It wraps the official `web.whatsapp.com` in your operating system's native webview and adds the desktop conveniences a browser tab can't — a system tray, native notifications, persistent login, global shortcuts, and microphone/camera access for voice messages and calls.
 
-It is an **unofficial, open-source WhatsApp client** and a practical **WhatsApp Desktop alternative** for people who want a fast, low-memory app instead of the heavier official build. It is not affiliated with WhatsApp or Meta.
+It is an **unofficial, open-source WhatsApp client** and a practical **WhatsApp Desktop alternative** for people who want a fast, native app with minimal overhead instead of the heavier Electron-based official build. It is not affiliated with WhatsApp or Meta.
 
-## Why whatRust? A low-RAM WhatsApp Desktop alternative
+## Why whatRust? A lean, native WhatsApp Desktop alternative
 
-Because it reuses the webview that already ships with your OS instead of bundling its own browser engine, **whatRust typically idles at a small fraction of the memory the Electron-based WhatsApp Desktop uses** — often several times lower, depending on your OS and usage.
+**whatRust's native app shell is small — typically around 90 MB** — because it reuses the webview that already ships with your OS instead of bundling its own browser engine the way Electron apps do. That gives it a much lighter baseline than the official Electron-based WhatsApp Desktop, which ships an entire Chromium runtime on top of the same WhatsApp Web page.
 
-The official WhatsApp Desktop app is built on Electron, which packs an entire Chromium browser inside every app. whatRust instead renders WhatsApp Web through the OS-native webview — **WebKitGTK** on Linux, **WebView2** on Windows, and **WKWebView** on macOS — via [Tauri v2](https://tauri.app). The result is a lightweight, low-RAM WhatsApp desktop app that starts fast and stays out of the way.
+The official WhatsApp Desktop app is built on Electron, which packs an entire Chromium browser inside every app. whatRust instead renders WhatsApp Web through the OS-native webview — **WebKitGTK** on Linux, **WebView2** on Windows, and **WKWebView** on macOS — via [Tauri v2](https://tauri.app). The result is a fast, native WhatsApp desktop app with a small footprint of its own.
+
+> **A fair caveat on total memory:** your overall RAM use is dominated by **WhatsApp Web itself** and grows with how many chats, groups, and media you keep open — commonly a few hundred MB up to ~1 GB for busy accounts. That cost is roughly the same in any browser-based client (whatRust, the official app, or a plain Chrome tab); whatRust's advantage is the lean native shell, not lighter web content.
 
 ## Features
 
@@ -58,7 +60,8 @@ The official WhatsApp Desktop app is built on Electron, which packs an entire Ch
 
 | Feature | whatRust | Official WhatsApp Desktop (Electron) |
 |---|---|---|
-| Idle RAM usage | Typically several× lower (approx., varies) | Higher — bundles Chromium |
+| App-shell memory overhead | Lean native shell (~90 MB), no bundled browser | Heavier — bundles a full Chromium + Node runtime |
+| Total RAM (with WhatsApp Web loaded) | Dominated by WhatsApp Web (similar across clients) | Dominated by WhatsApp Web **+** Electron runtime |
 | Rendering engine | OS-native webview (WebKitGTK / WebView2 / WKWebView) | Bundled Chromium (Electron) |
 | Built with | Rust + Tauri v2 | Electron (Chromium + Node.js) |
 | Open source | ✅ Yes | ❌ No |
@@ -130,8 +133,11 @@ No. whatRust is unofficial and independent — not affiliated with WhatsApp or M
 ### How is whatRust different from the official WhatsApp Desktop app?
 whatRust uses your OS's native webview instead of bundling a Chromium engine (as Electron does), which makes it considerably lighter. See the [comparison table](#whatrust-vs-the-official-whatsapp-desktop-electron).
 
-### Why does whatRust use less RAM than WhatsApp Desktop?
-Because it reuses the system webview rather than shipping a full Chromium runtime, its idle memory footprint is typically several times lower (approximate — it varies by OS and usage).
+### How much RAM does whatRust use?
+whatRust's own native shell is small — around 90 MB. Your **total** memory use is mostly WhatsApp Web's own footprint and scales with how many chats and how much media you keep open — commonly a few hundred MB up to ~1 GB for busy accounts, similar to WhatsApp Web in a browser tab.
+
+### Is whatRust lighter than the official WhatsApp Desktop app?
+Its native shell is lighter because it doesn't bundle a Chromium browser engine the way the Electron-based official app does, so it has less baseline overhead. The WhatsApp Web content itself uses a similar amount in either app.
 
 ### Which operating systems does whatRust support?
 Linux (WebKitGTK), Windows 10/11 (WebView2), and macOS 12+ (WKWebView).

@@ -13,6 +13,7 @@ pub fn badge_state(count: u32) -> BadgeState {
     }
 }
 
+use crate::accounts::{self, UnreadMap};
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
@@ -24,29 +25,33 @@ const ICON_NORMAL: &[u8] = include_bytes!("../icons/tray.png");
 const ICON_UNREAD: &[u8] = include_bytes!("../icons/tray-unread.png");
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItemBuilder::with_id("show", "Show / Hide").build(app)?;
-    let settings = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
-    let reload = MenuItemBuilder::with_id("reload", "Reload").build(app)?;
-    let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
-    let menu = MenuBuilder::new(app)
-        .items(&[&show, &settings, &reload, &quit])
-        .build()?;
+    // Placeholder menu; rebuild_menu fills in the per-account items at startup.
+    let menu = MenuBuilder::new(app).build()?;
 
     TrayIconBuilder::with_id("main-tray")
         .icon(Image::from_bytes(ICON_NORMAL)?)
         .tooltip("WhatsApp")
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "show" => toggle(app),
-            "settings" => crate::window::open_settings_window(app),
-            "reload" => {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.eval("window.location.reload()");
-                }
+        .on_menu_event(|app, event| {
+            let id = event.id().as_ref();
+            if let Some(acct_id) = id.strip_prefix("acct:") {
+                crate::window::show_account(app, &accounts::window_label(acct_id));
+                return;
             }
-            "quit" => app.exit(0),
-            _ => {}
+            match id {
+                "accounts" | "settings" => crate::window::open_settings_window(app),
+                "reload" => {
+                    if let Some(active) = app.try_state::<crate::accounts::ActiveAccount>() {
+                        let label = active.lock().unwrap().clone();
+                        if let Some(w) = app.get_webview_window(&label) {
+                            let _ = w.eval("window.location.reload()");
+                        }
+                    }
+                }
+                "quit" => app.exit(0),
+                _ => {}
+            }
         })
         .on_tray_icon_event(|tray, event| {
             // Note: Linux does not deliver left-click tray events; use the menu there.
@@ -56,24 +61,78 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 ..
             } = event
             {
-                toggle(tray.app_handle());
+                crate::window::show_active(tray.app_handle());
             }
         })
         .build(app)?;
     Ok(())
 }
 
-fn toggle(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        if w.is_visible().unwrap_or(false) {
-            let _ = w.hide();
+/// Rebuild the tray menu from the current accounts list: one `acct:<id>` item per
+/// account showing `name (n)`, then the static `Accounts… / Settings / Reload / Quit`.
+pub fn rebuild_menu(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id("main-tray") else {
+        return;
+    };
+
+    let f = accounts::load(app);
+
+    // Snapshot per-account unread, then DROP the UnreadMap guard before building the
+    // static items (update_badge / other paths may re-lock the map).
+    let counts: std::collections::HashMap<String, u32> = {
+        let state = app.state::<UnreadMap>();
+        let map = state.lock().unwrap();
+        map.clone()
+    };
+
+    let mut accts = f.accounts.clone();
+    accts.sort_by_key(|a| a.order);
+
+    let mut builder = MenuBuilder::new(app);
+    for a in &accts {
+        let unread = counts.get(&a.id).copied().unwrap_or(0);
+        let label = if unread > 0 {
+            format!("{} ({})", a.name, unread)
         } else {
-            crate::window::show_main(app);
-        }
+            a.name.clone()
+        };
+        let item = match MenuItemBuilder::with_id(format!("acct:{}", a.id), label).build(app) {
+            Ok(i) => i,
+            Err(_) => return,
+        };
+        builder = builder.item(&item);
     }
+
+    let Ok(accounts_item) = MenuItemBuilder::with_id("accounts", "Accounts\u{2026}").build(app)
+    else {
+        return;
+    };
+    let Ok(settings) = MenuItemBuilder::with_id("settings", "Settings").build(app) else {
+        return;
+    };
+    let Ok(reload) = MenuItemBuilder::with_id("reload", "Reload").build(app) else {
+        return;
+    };
+    let Ok(quit) = MenuItemBuilder::with_id("quit", "Quit").build(app) else {
+        return;
+    };
+
+    let menu = match builder
+        .separator()
+        .item(&accounts_item)
+        .item(&settings)
+        .item(&reload)
+        .item(&quit)
+        .build()
+    {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+
+    let _ = tray.set_menu(Some(menu));
 }
 
-/// Update the tray to reflect the current unread count.
+/// Update the tray to reflect the current (aggregate) unread count.
 pub fn update_badge(app: &AppHandle, count: u32) {
     let Some(tray) = app.tray_by_id("main-tray") else {
         return;

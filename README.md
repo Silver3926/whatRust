@@ -4,7 +4,7 @@
 
 # whatRust — Lightweight WhatsApp Web Desktop Client (Rust + Tauri)
 
-**whatRust is a free, open-source, lightweight desktop client for WhatsApp Web that runs on Linux, Windows, and macOS — a lean, native alternative to the official Electron-based WhatsApp Desktop app, built with Rust and Tauri v2.**
+**whatRust is a free, open-source, lightweight desktop client for WhatsApp Web that runs on Linux, Windows, and macOS — a lean, native alternative to the official Electron-based WhatsApp Desktop app, built with Rust and Tauri v2. It runs multiple WhatsApp accounts at once, each in its own window with a fully isolated login.**
 
 ![Latest release](https://img.shields.io/github/v/release/karem505/whatRust?label=release)
 ![License: MIT](https://img.shields.io/github/license/karem505/whatRust)
@@ -19,6 +19,7 @@
 - [What is whatRust?](#what-is-whatrust)
 - [Why whatRust? A lean, native WhatsApp Desktop alternative](#why-whatrust-a-lean-native-whatsapp-desktop-alternative)
 - [Features](#features)
+- [Run multiple WhatsApp accounts](#run-multiple-whatsapp-accounts)
 - [whatRust vs the official WhatsApp Desktop (Electron)](#whatrust-vs-the-official-whatsapp-desktop-electron)
 - [Requirements](#requirements)
 - [Installation](#installation)
@@ -45,6 +46,7 @@ The official WhatsApp Desktop app is built on Electron, which packs an entire Ch
 
 ## Features
 
+- **Multiple WhatsApp accounts** — run several numbers at once, each in its own window with a fully isolated login (add, rename, and remove accounts)
 - **System tray** icon with **close-to-tray** and an **unread message badge**
 - **Native OS notifications** for new messages
 - **Persistent login** — scan the QR code once, stay signed in across restarts
@@ -55,6 +57,16 @@ The official WhatsApp Desktop app is built on Electron, which packs an entire Ch
 - **Remembers window size and position**
 - **One-line install** on every platform
 - **Cross-platform**: Linux, Windows, and macOS from one Rust + Tauri codebase
+
+## Run multiple WhatsApp accounts
+
+whatRust runs **multiple WhatsApp accounts at the same time** — each account opens in its **own window** with a **completely isolated session** (separate cookies, local storage, and IndexedDB), so you can stay signed in to several numbers at once without them interfering.
+
+- **Add an account** in **Settings → Accounts** with the **+ Add** button, then scan the new QR code; you can **rename** or **remove** accounts there too.
+- Each account keeps its **own login, unread badge, and notifications**; the tray shows a **combined unread count** and a one-click switcher for every account.
+- Your **first (default) account keeps its existing login** when you upgrade — no need to re-scan.
+
+> **macOS note:** running **multiple accounts requires macOS 14 (Sonoma) or later**, where the system webview supports isolated data stores. On macOS 12–13 whatRust runs a single account. Linux and Windows have no such limit.
 
 ## whatRust vs the official WhatsApp Desktop (Electron)
 
@@ -71,6 +83,7 @@ The official WhatsApp Desktop app is built on Electron, which packs an entire Ch
 | Unread message badge | ✅ Yes | ✅ Yes |
 | Native notifications | ✅ Yes | ✅ Yes |
 | Voice messages & calls (mic/camera) | ✅ Yes | ✅ Yes |
+| Multiple accounts (isolated sessions) | ✅ Yes | ❌ No |
 | Global show/hide shortcut | ✅ Yes | ❌ No |
 | Launch at startup | ✅ Yes | ✅ Yes |
 | Affiliated with Meta | ❌ No (unofficial) | ✅ Yes |
@@ -81,7 +94,7 @@ The official WhatsApp Desktop app is built on Electron, which packs an entire Ch
 |---|---|---|
 | **Linux** | WebKitGTK | Requires WebKitGTK **≥ 2.46.1** (older versions hang WhatsApp's QR login). AppImage may need `libfuse2`. |
 | **Windows 10/11** | WebView2 | Uses the Evergreen WebView2 runtime (preinstalled on Windows 11). |
-| **macOS** | WKWebView | macOS 12+; the current build is Apple Silicon (arm64). |
+| **macOS** | WKWebView | macOS 12+ (running **multiple accounts** needs macOS 14+); the current build is Apple Silicon (arm64). |
 
 ## Installation
 
@@ -148,6 +161,9 @@ Yes — whatRust is free and open source under the MIT License. The source is on
 ### Do voice messages, voice calls, and video calls work in whatRust?
 Yes. whatRust grants the webview microphone and camera access, so voice messages and calls work the same as in WhatsApp Web.
 
+### Can I use multiple WhatsApp accounts in whatRust?
+Yes. whatRust supports **multiple WhatsApp accounts** running at the same time — each opens in its own window with a fully isolated session, so different numbers stay logged in independently. Add, rename, and remove accounts from **Settings → Accounts**. On macOS this requires macOS 14 or later; Linux and Windows have no limit.
+
 ### Does whatRust support the system tray and close-to-tray?
 Yes. It adds a system tray icon with an unread-message badge, can close to the tray, and forwards new messages to native OS notifications.
 
@@ -162,6 +178,7 @@ whatRust only loads the official `web.whatsapp.com` in a native webview and adds
 - **Windows unread count**: Windows tray icons ignore text labels, so the unread *number* appears only in the hover tooltip (the icon still switches to a badged variant). macOS and Linux show the count.
 - **Notification click** does not yet focus the window — use the tray icon or the global shortcut.
 - **macOS** builds are unsigned and currently Apple Silicon (arm64) only.
+- **Multiple accounts on macOS** require macOS 14+ (older macOS runs a single account); Linux and Windows are unrestricted.
 
 ## Contributing
 

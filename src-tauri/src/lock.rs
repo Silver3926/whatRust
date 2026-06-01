@@ -56,6 +56,12 @@ pub fn lock_now(app: &AppHandle) {
         Some(s) => s,
         None => return, // not yet set up — bail
     };
+    // Idempotent: if already locked, just ensure the lock screen is up — do NOT
+    // re-hide windows or clobber the recorded `hidden` list (which unlock restores).
+    if !*state.unlocked.lock().unwrap() {
+        show_lock_window(app);
+        return;
+    }
     *state.unlocked.lock().unwrap() = false;
     let mut hidden = Vec::new();
     for (label, w) in app.webview_windows() {

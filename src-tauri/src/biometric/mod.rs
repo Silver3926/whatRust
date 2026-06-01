@@ -8,7 +8,9 @@ pub enum Availability {
     Available,
     /// The mechanism exists but isn't set up (no enrolled print, no agent, etc.).
     NotConfigured,
-    /// Not supported on this OS / version.
+    /// Not supported on this OS / version. Only constructed by the Windows/macOS
+    /// backends; appears unused on Linux where polkit yields Available/NotConfigured.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     Unsupported,
 }
 

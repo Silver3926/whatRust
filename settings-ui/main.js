@@ -245,7 +245,7 @@ function stopRecording(restore) {
   if (restore) document.getElementById("hotkey").value = hotkeyPrev;
 }
 
-function onRecordBlur() { stopRecording(true); }
+function onRecordBlur() { setHotkeyHint(""); stopRecording(true); }
 
 function onRecordKeydown(e) {
   e.preventDefault();

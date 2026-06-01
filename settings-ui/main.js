@@ -126,9 +126,97 @@ async function addAccount() {
 window.addEventListener("DOMContentLoaded", () => {
   load();
   loadAccounts();
+  loadLock();
+  wireLock();
   document.getElementById("save").addEventListener("click", save);
   document.getElementById("add_account").addEventListener("click", addAccount);
   document.getElementById("new_account_name").addEventListener("keydown", (e) => {
     if (e.key === "Enter") addAccount();
   });
 });
+
+// --- App lock ---
+
+async function loadLock() {
+  let s;
+  try {
+    s = await invoke("get_lock_status");
+  } catch (e) {
+    return;
+  }
+  const disabled = document.getElementById("lock-disabled");
+  const enabled = document.getElementById("lock-enabled");
+  disabled.hidden = s.enabled;
+  enabled.hidden = !s.enabled;
+
+  if (s.enabled) {
+    const row = document.getElementById("biometric_row");
+    row.hidden = !s.biometric_available;
+    document.getElementById("biometric_label").textContent = "Use " + s.biometric_label;
+    document.getElementById("biometric_enabled").checked = s.biometric_enabled;
+    document.getElementById("lock_on_launch").checked = s.lock_on_launch;
+    document.getElementById("lock_on_hide").checked = s.lock_on_hide;
+    document.getElementById("idle_min").value = String(Math.round(s.idle_secs / 60));
+  }
+}
+
+async function saveLockOptions() {
+  const idleMin = parseInt(document.getElementById("idle_min").value, 10) || 0;
+  await invoke("set_app_lock_options", {
+    lockOnLaunch: document.getElementById("lock_on_launch").checked,
+    lockOnHide: document.getElementById("lock_on_hide").checked,
+    idleSecs: Math.max(0, idleMin) * 60,
+  });
+}
+
+function wireLock() {
+  document.getElementById("enable_lock").addEventListener("click", async () => {
+    const a = document.getElementById("lock_pw1").value;
+    const b = document.getElementById("lock_pw2").value;
+    try {
+      await invoke("set_app_lock_password", { new: a, confirm: b });
+      document.getElementById("lock_pw1").value = "";
+      document.getElementById("lock_pw2").value = "";
+      await loadLock();
+    } catch (e) { alert(String(e)); }
+  });
+
+  document.getElementById("lock_now").addEventListener("click", async () => {
+    try { await invoke("lock_app"); } catch (e) { alert(String(e)); }
+  });
+
+  document.getElementById("change_pw").addEventListener("click", async () => {
+    const current = prompt("Current password:");
+    if (current === null) return;
+    const next = prompt("New password (min 4):");
+    if (!next) return;
+    try {
+      await invoke("change_app_lock_password", { current, new: next, confirm: next });
+      alert("Password changed.");
+    } catch (e) { alert(String(e)); }
+  });
+
+  document.getElementById("disable_lock").addEventListener("click", async () => {
+    const current = prompt("Enter your current password to disable the lock:");
+    if (current === null) return;
+    try {
+      await invoke("disable_app_lock", { current });
+      await loadLock();
+    } catch (e) { alert(String(e)); }
+  });
+
+  document.getElementById("biometric_enabled").addEventListener("change", async (e) => {
+    try {
+      await invoke("set_biometric_enabled", { enabled: e.target.checked });
+    } catch (err) {
+      alert(String(err));
+      e.target.checked = !e.target.checked; // revert on failure
+    }
+    await loadLock();
+  });
+
+  for (const id of ["lock_on_launch", "lock_on_hide"]) {
+    document.getElementById(id).addEventListener("change", () => saveLockOptions().catch((e) => alert(String(e))));
+  }
+  document.getElementById("idle_min").addEventListener("change", () => saveLockOptions().catch((e) => alert(String(e))));
+}

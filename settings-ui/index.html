@@ -32,6 +32,35 @@
       <input type="text" id="hotkey" placeholder="CmdOrCtrl+Shift+W" />
     </label>
 
+    <hr class="divider" />
+    <h2 class="section-title">Security</h2>
+
+    <div id="lock-disabled">
+      <label class="field"><span>App-lock password (min 4 characters)</span>
+        <input type="password" id="lock_pw1" autocomplete="new-password" /></label>
+      <label class="field"><span>Confirm password</span>
+        <input type="password" id="lock_pw2" autocomplete="new-password" /></label>
+      <button id="enable_lock">Enable app lock</button>
+    </div>
+
+    <div id="lock-enabled" hidden>
+      <label class="row" id="biometric_row" hidden>
+        <input type="checkbox" id="biometric_enabled" /> <span id="biometric_label">Use biometric</span>
+      </label>
+      <label class="row"><input type="checkbox" id="lock_on_launch" /> <span>Lock on launch</span></label>
+      <label class="row"><input type="checkbox" id="lock_on_hide" /> <span>Lock when hidden to tray</span></label>
+      <label class="field"><span>Auto-lock when idle (minutes, 0 = off)</span>
+        <input type="number" id="idle_min" min="0" step="1" value="0" /></label>
+      <div class="actions">
+        <button id="lock_now">Lock now</button>
+        <button id="change_pw" class="secondary">Change password…</button>
+        <button id="disable_lock" class="secondary">Disable…</button>
+      </div>
+    </div>
+
+    <p class="lock-note">App lock controls who can open whatRust's windows. It does
+      <strong>not</strong> encrypt your data on disk.</p>
+
     <div class="actions">
       <button id="save">Save</button>
       <span id="note" class="note"></span>

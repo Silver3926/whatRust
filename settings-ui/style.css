@@ -56,3 +56,5 @@ h2 { font-size: 14px; margin: 0 0 10px; font-weight: 600; }
 .add-row button:disabled { opacity: 0.4; cursor: not-allowed; }
 .macos-note { color: #c0392b; font-size: 12px; margin: 8px 0 0; }
 .macos-note[hidden] { display: none; }
+.lock-note { font-size: 12px; color: #8696a0; margin-top: 10px; line-height: 1.4; }
+#lock-enabled .field input[type="number"] { width: 80px; }

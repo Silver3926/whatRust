@@ -38,9 +38,12 @@ windows = { version = "0.61", features = [
   "Win32_System_Com",         # existing (webview2 permission handler)
   "Security_Credentials_UI",  # UserConsentVerifier + result/availability enums
   "Win32_System_WinRT",       # IUserConsentVerifierInterop
-  "Foundation",               # IAsyncOperation
+  "Foundation",               # async return-type plumbing
 ] }
 windows-core = "0.61"
+# In windows-rs 0.61 IAsyncOperation moved out of windows::Foundation into the
+# windows-future crate (0.2.1 is already in the tree via the windows stack).
+windows-future = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS < 14 guard for data_store_identifier (per-account isolation). Already at

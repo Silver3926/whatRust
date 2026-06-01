@@ -1,7 +1,9 @@
 use super::Availability;
 use tauri::Manager;
 use windows::core::{factory, HSTRING};
-use windows::Foundation::IAsyncOperation;
+// In windows-rs 0.61 the async operation types live in the windows-future crate,
+// NOT windows::Foundation. `IAsyncOperation::get()` (blocking) is from there too.
+use windows_future::IAsyncOperation;
 use windows::Security::Credentials::UI::{
     UserConsentVerificationResult, UserConsentVerifier, UserConsentVerifierAvailability,
 };

@@ -23,6 +23,8 @@ button {
   padding: 9px 18px; font-weight: 600; font-size: 14px; cursor: pointer;
 }
 button:hover { filter: brightness(1.05); }
+button.secondary { background: transparent; color: inherit; border: 1px solid #8886; }
+button.secondary:hover { filter: none; background: #8881; }
 .note { color: var(--green); font-weight: 600; }
 
 /* --- Accounts manager --- */

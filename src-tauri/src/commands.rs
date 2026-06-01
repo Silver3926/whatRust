@@ -1,4 +1,6 @@
 use crate::accounts::{self, ActiveAccount, UnreadMap};
+use crate::applock::{self, AppLockConfig};
+use crate::lock;
 use crate::settings::Settings;
 use serde::Serialize;
 use tauri::Manager;
@@ -68,6 +70,7 @@ pub fn get_settings(window: tauri::Window, app: tauri::AppHandle) -> Result<Sett
     if is_remote(&window) {
         return Err("forbidden".into());
     }
+    lock::require_unlocked(&app)?;
     Ok(crate::settings::load(&app))
 }
 
@@ -80,17 +83,20 @@ pub fn set_settings(
     if is_remote(&window) {
         return Err("forbidden".into());
     }
+    lock::require_unlocked(&app)?;
     crate::settings::save(&app, &settings).map_err(|e| e.to_string())?;
     crate::settings::apply(&app, &settings);
     Ok(())
 }
 
 #[tauri::command]
-pub fn open_settings(window: tauri::Window, app: tauri::AppHandle) {
+pub fn open_settings(window: tauri::Window, app: tauri::AppHandle) -> Result<(), String> {
     if is_remote(&window) {
-        return;
+        return Err("forbidden".into());
     }
+    lock::require_unlocked(&app)?;
     crate::window::open_settings_window(&app);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +141,7 @@ pub fn list_accounts(
     if is_remote(&window) {
         return Err("forbidden".into());
     }
+    lock::require_unlocked(&app)?;
     Ok(account_views(&app))
 }
 
@@ -147,6 +154,7 @@ pub fn add_account(
     if is_remote(&window) {
         return Err("forbidden".into());
     }
+    lock::require_unlocked(&app)?;
     // macOS < 14 cannot isolate additional accounts (no data_store_identifier).
     crate::window::ensure_isolation_supported()?;
 
@@ -180,6 +188,7 @@ pub fn remove_account(
     if is_remote(&window) {
         return Err("forbidden".into());
     }
+    lock::require_unlocked(&app)?;
 
     let mut f = accounts::load(&app);
     let removed = accounts::remove(&mut f, &id)?;
@@ -218,6 +227,7 @@ pub fn rename_account(
     if is_remote(&window) {
         return Err("forbidden".into());
     }
+    lock::require_unlocked(&app)?;
     let name = name.trim();
     if name.is_empty() {
         return Err("account name cannot be empty".into());
@@ -239,6 +249,7 @@ pub fn open_account(window: tauri::Window, app: tauri::AppHandle, id: String) ->
     if is_remote(&window) {
         return Err("forbidden".into());
     }
+    lock::require_unlocked(&app)?;
     let f = accounts::load(&app);
     let Some(acct) = f.accounts.iter().find(|a| a.id == id) else {
         return Err(format!("unknown account: {id}"));
@@ -256,6 +267,231 @@ pub fn open_account(window: tauri::Window, app: tauri::AppHandle, id: String) ->
         *active.lock().unwrap() = accounts::window_label(&acct.id);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// App-lock commands.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LockStatus {
+    pub enabled: bool,
+    pub biometric_available: bool,
+    pub biometric_enabled: bool,
+    pub biometric_label: String,
+    pub lock_on_launch: bool,
+    pub lock_on_hide: bool,
+    pub idle_secs: u32,
+}
+
+/// Read-only status for BOTH the settings window and the lock screen. Never returns
+/// the password hash. Allowed from any non-remote window, even while locked.
+#[tauri::command]
+pub fn get_lock_status(window: tauri::Window, app: tauri::AppHandle) -> Result<LockStatus, String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    let c = applock::load(&app);
+    let available = matches!(crate::biometric::availability(), crate::biometric::Availability::Available);
+    Ok(LockStatus {
+        enabled: c.is_active(),
+        biometric_available: available,
+        biometric_enabled: c.biometric_enabled && available,
+        biometric_label: crate::biometric::label().to_string(),
+        lock_on_launch: c.lock_on_launch,
+        lock_on_hide: c.lock_on_hide,
+        idle_secs: c.idle_secs,
+    })
+}
+
+/// Enable the lock by setting the first password. Errors if already enabled (use
+/// `change_app_lock_password`). Runs only from an unlocked, local window.
+#[tauri::command]
+pub fn set_app_lock_password(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    new: String,
+    confirm: String,
+) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    let mut c = applock::load(&app);
+    if c.is_active() {
+        return Err("app lock is already enabled".into());
+    }
+    if new != confirm {
+        return Err("passwords do not match".into());
+    }
+    if new.chars().count() < 4 {
+        return Err("password must be at least 4 characters".into());
+    }
+    c.password_phc = Some(applock::hash_password(&new)?);
+    c.enabled = true;
+    applock::save(&app, &c).map_err(|e| e.to_string())?;
+    crate::tray::rebuild_menu(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn change_app_lock_password(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    current: String,
+    new: String,
+    confirm: String,
+) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    let mut c = applock::load(&app);
+    let phc = c.password_phc.clone().ok_or("app lock is not enabled")?;
+    if !applock::verify_password(&current, &phc) {
+        return Err("current password is incorrect".into());
+    }
+    if new != confirm {
+        return Err("passwords do not match".into());
+    }
+    if new.chars().count() < 4 {
+        return Err("password must be at least 4 characters".into());
+    }
+    c.password_phc = Some(applock::hash_password(&new)?);
+    applock::save(&app, &c).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn disable_app_lock(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    current: String,
+) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    let mut c = applock::load(&app);
+    let phc = c.password_phc.clone().ok_or("app lock is not enabled")?;
+    if !applock::verify_password(&current, &phc) {
+        return Err("current password is incorrect".into());
+    }
+    c = AppLockConfig::default(); // fully reset: disabled, no hash, no biometric, default triggers
+    applock::save(&app, &c).map_err(|e| e.to_string())?;
+    crate::tray::rebuild_menu(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_app_lock_options(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    lock_on_launch: bool,
+    lock_on_hide: bool,
+    idle_secs: u32,
+) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    let mut c = applock::load(&app);
+    c.lock_on_launch = lock_on_launch;
+    c.lock_on_hide = lock_on_hide;
+    c.idle_secs = idle_secs;
+    applock::save(&app, &c).map_err(|e| e.to_string())
+}
+
+/// Enable/disable biometric. Enabling requires the lock to be set, the platform to
+/// report Available, and one successful test authentication.
+#[tauri::command]
+pub fn set_biometric_enabled(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    let mut c = applock::load(&app);
+    if enabled {
+        if !c.is_active() {
+            return Err("set an app-lock password first".into());
+        }
+        if !matches!(crate::biometric::availability(), crate::biometric::Availability::Available) {
+            return Err("biometric authentication is not available on this device".into());
+        }
+        if !crate::biometric::authenticate(&app, "Enable biometric unlock for whatRust")? {
+            return Err("biometric test did not succeed".into());
+        }
+    }
+    c.biometric_enabled = enabled;
+    applock::save(&app, &c).map_err(|e| e.to_string())
+}
+
+/// Manual "Lock now" from the settings window.
+#[tauri::command]
+pub fn lock_app(window: tauri::Window, app: tauri::AppHandle) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    if !applock::load(&app).is_active() {
+        return Err("app lock is not enabled".into());
+    }
+    lock::lock_now(&app);
+    Ok(())
+}
+
+/// Unlock with the password. Lock-window only; works while locked (no require_unlocked).
+#[tauri::command]
+pub fn unlock_password(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    password: String,
+) -> Result<bool, String> {
+    if !lock::is_lock_window(&window) {
+        return Err("forbidden".into());
+    }
+    let c = applock::load(&app);
+    let Some(phc) = c.password_phc else {
+        // No lock configured — treat as already unlocked.
+        lock::unlock(&app);
+        return Ok(true);
+    };
+    if applock::verify_password(&password, &phc) {
+        lock::unlock(&app);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Unlock with biometric. Lock-window only; works while locked.
+#[tauri::command]
+pub fn unlock_biometric(window: tauri::Window, app: tauri::AppHandle) -> Result<bool, String> {
+    if !lock::is_lock_window(&window) {
+        return Err("forbidden".into());
+    }
+    if !applock::load(&app).biometric_enabled {
+        return Err("biometric unlock is not enabled".into());
+    }
+    if crate::biometric::authenticate(&app, "Unlock whatRust")? {
+        lock::unlock(&app);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Forgot-password reset: wipe ALL account sessions + the app-lock config, then
+/// relaunch fresh (logged out, lock disabled). Lock-window only.
+#[tauri::command]
+pub fn reset_app_lock(window: tauri::Window, app: tauri::AppHandle) -> Result<(), String> {
+    if !lock::is_lock_window(&window) {
+        return Err("forbidden".into());
+    }
+    crate::applock::reset_all(&app);
+    app.restart();
 }
 
 #[cfg(test)]

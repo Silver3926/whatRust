@@ -87,6 +87,30 @@ pub fn verify_password(password: &str, phc: &str) -> bool {
     }
 }
 
+/// Factory-reset everything the lock could gate: every account profile dir, the
+/// default webview store, accounts.json, and app-lock.json. Used by the forgot-
+/// password reset. Best-effort: ignores individual delete errors.
+pub fn reset_all(app: &AppHandle) {
+    // Per-account isolated profiles + the default shared store.
+    let f = crate::accounts::load(app);
+    for a in &f.accounts {
+        crate::accounts::delete_profile(app, &a.id);
+    }
+    if let Ok(dir) = app.path().app_config_dir() {
+        let _ = std::fs::remove_file(dir.join("accounts.json"));
+        let _ = std::fs::remove_file(dir.join("app-lock.json"));
+    }
+    // The default account's webview data lives under the app data dir.
+    if let Ok(data) = app.path().app_data_dir() {
+        // Remove only known webview store dirs; do not nuke the whole data dir blindly.
+        // NOTE: ["EBWebView", "default"] is a best-effort guess for the default-account
+        // webview store path and must be confirmed on Linux in the Task 10 smoke test.
+        for sub in ["EBWebView", "default"] {
+            let _ = std::fs::remove_dir_all(data.join(sub));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

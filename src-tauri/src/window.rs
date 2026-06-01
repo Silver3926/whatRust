@@ -231,6 +231,12 @@ pub fn show_account(app: &AppHandle, label: &str) {
 /// Show the active (last-focused) account window. Falls back to the first existing
 /// account window, then the settings window.
 pub fn show_active(app: &AppHandle) {
+    // If the app is locked, any "reveal" request shows the lock screen, never an
+    // account window. Covers tray click, global shortcut, single-instance, macOS Reopen.
+    if !crate::lock::is_unlocked(app) {
+        crate::lock::show_lock_window(app);
+        return;
+    }
     if let Some(active) = app.try_state::<ActiveAccount>() {
         let label = active.lock().unwrap().clone();
         if app.get_webview_window(&label).is_some() {

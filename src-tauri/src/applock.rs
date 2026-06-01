@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
 /// Persisted app-lock configuration. Stored in its own `app-lock.json` (NOT in
@@ -87,28 +87,40 @@ pub fn verify_password(password: &str, phc: &str) -> bool {
     }
 }
 
-/// Factory-reset everything the lock could gate: every account profile dir, the
-/// default webview store, accounts.json, and app-lock.json. Used by the forgot-
-/// password reset. Best-effort: ignores individual delete errors.
+/// Paths a factory reset removes, given whatRust's two app dirs. Pure so it can be
+/// unit-tested. `app_data_dir` is whatRust-exclusive (`<base>/com.karem.whatrust`) and
+/// holds BOTH the default account's webview store (directly under it, on Linux/Windows)
+/// and the per-account `profiles/` dirs — removing it logs every account out.
+fn reset_targets(config_dir: &Path, data_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        config_dir.join("accounts.json"),
+        config_dir.join("app-lock.json"),
+        data_dir.to_path_buf(),
+    ]
+}
+
+/// Factory reset for the forgot-password flow: log out ALL accounts and clear the lock.
 pub fn reset_all(app: &AppHandle) {
-    // Per-account isolated profiles + the default shared store.
+    // Belt-and-suspenders: explicitly drop each per-account profile first.
     let f = crate::accounts::load(app);
     for a in &f.accounts {
         crate::accounts::delete_profile(app, &a.id);
     }
-    if let Ok(dir) = app.path().app_config_dir() {
-        let _ = std::fs::remove_file(dir.join("accounts.json"));
-        let _ = std::fs::remove_file(dir.join("app-lock.json"));
-    }
-    // The default account's webview data lives under the app data dir.
-    if let Ok(data) = app.path().app_data_dir() {
-        // Remove only known webview store dirs; do not nuke the whole data dir blindly.
-        // NOTE: ["EBWebView", "default"] is a best-effort guess for the default-account
-        // webview store path and must be confirmed on Linux in the Task 10 smoke test.
-        for sub in ["EBWebView", "default"] {
-            let _ = std::fs::remove_dir_all(data.join(sub));
+    // Then remove the config files + the whole data root (default store + profiles).
+    let config_dir = app.path().app_config_dir().ok();
+    let data_dir = app.path().app_data_dir().ok();
+    if let (Some(c), Some(d)) = (config_dir, data_dir) {
+        for p in reset_targets(&c, &d) {
+            if p.is_dir() {
+                let _ = std::fs::remove_dir_all(&p);
+            } else {
+                let _ = std::fs::remove_file(&p);
+            }
         }
     }
+    // NOTE (macOS, hardware-pending): the default account uses the system WKWebsiteDataStore
+    // and additional accounts use data_store_identifier — both system-managed, NOT plain files
+    // under app_data_dir, so file deletion alone may not fully log out on macOS. Verify on a Mac.
 }
 
 #[cfg(test)]
@@ -175,5 +187,17 @@ mod tests {
     #[test]
     fn verify_rejects_garbage_phc() {
         assert!(!verify_password("anything", "not-a-phc-string"));
+    }
+
+    #[test]
+    fn reset_targets_cover_config_files_and_the_data_root() {
+        use std::path::Path;
+        let cfg = Path::new("/x/config");
+        let data = Path::new("/x/data");
+        let t = super::reset_targets(cfg, data);
+        assert!(t.contains(&cfg.join("accounts.json")));
+        assert!(t.contains(&cfg.join("app-lock.json")));
+        // The data root must be a target — this is what logs the DEFAULT account out.
+        assert!(t.contains(&data.to_path_buf()));
     }
 }

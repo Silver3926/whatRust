@@ -22,6 +22,12 @@ fn is_remote_label(label: &str) -> bool {
 
 #[tauri::command]
 pub fn notify(window: tauri::Window, app: tauri::AppHandle, title: String, body: String) {
+    // While locked, suppress notifications entirely so message previews don't leak
+    // to the OS notification center / lock screen. The tray unread badge still updates
+    // via set_unread (a count only, no content).
+    if !crate::lock::is_unlocked(&app) {
+        return;
+    }
     if !crate::settings::load(&app).notifications {
         return;
     }

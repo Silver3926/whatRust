@@ -27,18 +27,29 @@ argon2 = { version = "0.5.3", features = ["std"] }  # Argon2id password hashing 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Version-matched to wry 0.55's webkit2gtk so PlatformWebview::inner() types unify.
 webkit2gtk = "=2.0.2"
+zbus = "5"
+zbus_polkit = "5.0.0"
 
 [target.'cfg(windows)'.dependencies]
 # Version-matched to wry 0.55 for the WebView2 PermissionRequested mic/camera handler.
 webview2-com = "0.38"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com"] }
+windows = { version = "0.61", features = [
+  "Win32_Foundation",         # existing
+  "Win32_System_Com",         # existing (webview2 permission handler)
+  "Security_Credentials_UI",  # UserConsentVerifier + result/availability enums
+  "Win32_System_WinRT",       # IUserConsentVerifierInterop
+  "Foundation",               # IAsyncOperation
+] }
 windows-core = "0.61"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS < 14 guard for data_store_identifier (per-account isolation). Already at
 # 0.3.2 in Cargo.lock via the dependency graph; the NSProcessInfo feature must be
-# explicit. Inert on Linux/Windows.
-objc2-foundation = { version = "0.3", features = ["NSProcessInfo"] }
+# explicit. Inert on Linux/Windows. NSString + NSError added for the Touch ID backend.
+objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString", "NSError"] }
+objc2-local-authentication = { version = "0.3.2", features = ["LAContext", "block2"] }
+objc2 = "0.6"
+block2 = "0.6"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-notification = "2"

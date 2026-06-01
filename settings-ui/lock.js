@@ -2,9 +2,15 @@ const invoke = window.__TAURI__.core.invoke;
 const pwd = document.getElementById("password");
 const errEl = document.getElementById("error");
 
+let busy = false;
+
 async function tryUnlock() {
+  if (busy) return;
   const password = pwd.value;
-  if (!password) return;
+  if (!password) { errEl.textContent = "Enter your password."; return; }
+  busy = true;
+  document.getElementById("unlock").disabled = true;
+  document.getElementById("biometric").disabled = true;
   errEl.textContent = "";
   try {
     const ok = await invoke("unlock_password", { password });
@@ -15,16 +21,28 @@ async function tryUnlock() {
     }
   } catch (e) {
     errEl.textContent = String(e);
+  } finally {
+    busy = false;
+    document.getElementById("unlock").disabled = false;
+    document.getElementById("biometric").disabled = false;
   }
 }
 
 async function tryBiometric() {
+  if (busy) return;
+  busy = true;
+  document.getElementById("unlock").disabled = true;
+  document.getElementById("biometric").disabled = true;
   errEl.textContent = "";
   try {
     const ok = await invoke("unlock_biometric");
     if (!ok) errEl.textContent = "Biometric authentication failed — enter your password.";
   } catch (e) {
     errEl.textContent = String(e);
+  } finally {
+    busy = false;
+    document.getElementById("unlock").disabled = false;
+    document.getElementById("biometric").disabled = false;
   }
 }
 
@@ -52,7 +70,7 @@ async function init() {
   try {
     const s = await invoke("get_lock_status");
     if (s.biometric_enabled) {
-      bio.textContent = "Use " + s.biometric_label;
+      bio.textContent = "Use " + (s.biometric_label || "biometrics");
       bio.hidden = false;
       tryBiometric(); // auto-prompt on load
     }

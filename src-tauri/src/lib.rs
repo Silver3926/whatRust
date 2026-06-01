@@ -1,4 +1,5 @@
 mod accounts;
+mod applock;
 mod window;
 mod unread;
 mod settings;

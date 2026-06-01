@@ -46,3 +46,4 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-window-state = "2"
+user-idle = { version = "0.6", default-features = false, features = ["dbus"] }  # system idle time for the idle auto-lock trigger (dbus: no libxss-dev needed)

@@ -138,6 +138,31 @@ pub fn run() {
             if lock_on_launch && !start_hidden {
                 lock::show_lock_window(handle);
             }
+
+            // Idle auto-lock watcher. Always running; no-op unless the lock is active
+            // with idle_secs > 0 and the app is currently unlocked.
+            #[cfg(desktop)]
+            {
+                let idle_handle = handle.clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    let c = applock::load(&idle_handle);
+                    if !c.is_active() || c.idle_secs == 0 {
+                        continue;
+                    }
+                    if !lock::is_unlocked(&idle_handle) {
+                        continue;
+                    }
+                    let idle_ok = user_idle::UserIdle::get_time()
+                        .map(|t| t.as_seconds() >= c.idle_secs as u64)
+                        .unwrap_or(false);
+                    if idle_ok {
+                        let h = idle_handle.clone();
+                        let _ = idle_handle.run_on_main_thread(move || lock::lock_now(&h));
+                    }
+                });
+            }
+
             Ok(())
         })
         .build(tauri::generate_context!())

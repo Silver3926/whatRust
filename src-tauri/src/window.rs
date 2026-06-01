@@ -46,7 +46,10 @@ pub fn open_account_window(
     win.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             if crate::settings::load(&app_handle).close_to_tray {
-                if let Some(w) = app_handle.get_webview_window(&label_for_close) {
+                let lc = crate::applock::load(&app_handle);
+                if lc.is_active() && lc.lock_on_hide {
+                    crate::lock::lock_now(&app_handle);
+                } else if let Some(w) = app_handle.get_webview_window(&label_for_close) {
                     let _ = w.hide();
                 }
                 api.prevent_close();

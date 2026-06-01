@@ -35,6 +35,11 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
+            // While locked, every menu action except Quit just (re)shows the lock screen.
+            if !crate::lock::is_unlocked(app) && id != "quit" {
+                crate::lock::show_lock_window(app);
+                return;
+            }
             if let Some(acct_id) = id.strip_prefix("acct:") {
                 crate::window::show_account(app, &accounts::window_label(acct_id));
                 return;
@@ -49,6 +54,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                         }
                     }
                 }
+                "lock" => crate::lock::lock_now(app),
                 "quit" => app.exit(0),
                 _ => {}
             }
@@ -69,11 +75,13 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 }
 
 /// Rebuild the tray menu from the current accounts list: one `acct:<id>` item per
-/// account showing `name (n)`, then the static `Accounts… / Settings / Reload / Quit`.
+/// account showing `name (n)`, then the static `Accounts… / Settings / Reload / [Lock now] / Quit`.
 pub fn rebuild_menu(app: &AppHandle) {
     let Some(tray) = app.tray_by_id("main-tray") else {
         return;
     };
+
+    let lock_active = crate::applock::load(app).is_active();
 
     let f = accounts::load(app);
 
@@ -117,14 +125,18 @@ pub fn rebuild_menu(app: &AppHandle) {
         return;
     };
 
-    let menu = match builder
+    let mut tail = builder
         .separator()
         .item(&accounts_item)
         .item(&settings)
-        .item(&reload)
-        .item(&quit)
-        .build()
-    {
+        .item(&reload);
+    if lock_active {
+        let Ok(lock_item) = MenuItemBuilder::with_id("lock", "Lock now").build(app) else {
+            return;
+        };
+        tail = tail.item(&lock_item);
+    }
+    let menu = match tail.item(&quit).build() {
         Ok(m) => m,
         Err(_) => return,
     };

@@ -133,6 +133,7 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("new_account_name").addEventListener("keydown", (e) => {
     if (e.key === "Enter") addAccount();
   });
+  document.getElementById("record_hotkey").addEventListener("click", toggleRecording);
 });
 
 // --- App lock ---
@@ -219,4 +220,58 @@ function wireLock() {
     document.getElementById(id).addEventListener("change", () => saveLockOptions().catch((e) => alert(String(e))));
   }
   document.getElementById("idle_min").addEventListener("change", () => saveLockOptions().catch((e) => alert(String(e))));
+}
+
+// --- Shortcut recorder ---
+
+let recordingHotkey = false;
+let hotkeyPrev = "";
+const MODIFIER_KEYS = new Set(["Control", "Shift", "Alt", "Meta"]);
+
+function setHotkeyHint(msg) {
+  const hint = document.getElementById("hotkey_hint");
+  if (!msg) { hint.hidden = true; hint.textContent = ""; }
+  else { hint.textContent = msg; hint.hidden = false; }
+}
+
+function stopRecording(restore) {
+  if (!recordingHotkey) return;
+  recordingHotkey = false;
+  window.removeEventListener("keydown", onRecordKeydown, true);
+  window.removeEventListener("blur", onRecordBlur, true);
+  const btn = document.getElementById("record_hotkey");
+  btn.textContent = "Record";
+  btn.classList.remove("recording");
+  if (restore) document.getElementById("hotkey").value = hotkeyPrev;
+}
+
+function onRecordBlur() { stopRecording(true); }
+
+function onRecordKeydown(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  if (MODIFIER_KEYS.has(e.key)) return;            // ignore bare modifiers
+  if (e.key === "Escape") { setHotkeyHint(""); stopRecording(true); return; }
+  const mods = { ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey };
+  const accel = window.HotkeyFmt.comboToAccelerator(mods, e.code);
+  if (accel === null) { setHotkeyHint("Unsupported key — try another."); return; }
+  if (!window.HotkeyFmt.isValidCombo(mods, e.code)) {
+    setHotkeyHint("Add a modifier (Ctrl / Alt / Shift).");
+    return;
+  }
+  document.getElementById("hotkey").value = accel;
+  setHotkeyHint("");
+  stopRecording(false);
+}
+
+function toggleRecording() {
+  if (recordingHotkey) { setHotkeyHint(""); stopRecording(true); return; }
+  recordingHotkey = true;
+  hotkeyPrev = document.getElementById("hotkey").value;
+  const btn = document.getElementById("record_hotkey");
+  btn.textContent = "Press keys… (Esc to cancel)";
+  btn.classList.add("recording");
+  setHotkeyHint("");
+  window.addEventListener("keydown", onRecordKeydown, true);
+  window.addEventListener("blur", onRecordBlur, true);
 }

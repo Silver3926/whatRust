@@ -18,10 +18,19 @@ async function save() {
   }
   const hk = document.getElementById("hotkey").value.trim();
   s.hotkey = hk || "CmdOrCtrl+Shift+W";
-  await invoke("set_settings", { settings: s });
   const note = document.getElementById("note");
-  note.textContent = "Saved ✓";
-  setTimeout(() => (note.textContent = ""), 1500);
+  try {
+    const warn = await invoke("set_settings", { settings: s });
+    if (warn) {
+      note.textContent = "Saved — shortcut not registered (may be in use): " + warn;
+      setTimeout(() => (note.textContent = ""), 6000);
+    } else {
+      note.textContent = "Saved ✓";
+      setTimeout(() => (note.textContent = ""), 1500);
+    }
+  } catch (e) {
+    note.textContent = String(e);
+  }
 }
 
 // --- Accounts ---

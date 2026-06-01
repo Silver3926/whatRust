@@ -85,14 +85,13 @@ pub fn set_settings(
     window: tauri::Window,
     app: tauri::AppHandle,
     settings: Settings,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     if is_remote(&window) {
         return Err("forbidden".into());
     }
     lock::require_unlocked(&app)?;
     crate::settings::save(&app, &settings).map_err(|e| e.to_string())?;
-    crate::settings::apply(&app, &settings);
-    Ok(())
+    Ok(crate::settings::apply(&app, &settings))
 }
 
 #[tauri::command]

@@ -133,7 +133,7 @@ pub fn run() {
 
             tray::setup(handle)?;
             tray::rebuild_menu(handle);
-            settings::apply(handle, &s);
+            let _ = settings::apply(handle, &s);
 
             if lock_on_launch && !start_hidden {
                 lock::show_lock_window(handle);

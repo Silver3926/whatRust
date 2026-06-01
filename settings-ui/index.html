@@ -29,8 +29,12 @@
 
     <label class="field">
       <span>Shortcut</span>
-      <input type="text" id="hotkey" placeholder="CmdOrCtrl+Shift+W" />
+      <div class="hotkey-row">
+        <input type="text" id="hotkey" placeholder="CmdOrCtrl+Shift+W" />
+        <button type="button" id="record_hotkey" class="secondary">Record</button>
+      </div>
     </label>
+    <p id="hotkey_hint" class="hotkey-hint" hidden></p>
 
     <hr class="divider" />
     <h2 class="section-title">Security</h2>
@@ -66,6 +70,7 @@
       <span id="note" class="note"></span>
     </div>
 
+    <script src="hotkey.js"></script>
     <script src="main.js"></script>
   </body>
 </html>

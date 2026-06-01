@@ -58,3 +58,8 @@ h2 { font-size: 14px; margin: 0 0 10px; font-weight: 600; }
 .macos-note[hidden] { display: none; }
 .lock-note { font-size: 12px; color: #8696a0; margin-top: 10px; line-height: 1.4; }
 #lock-enabled .field input[type="number"] { width: 80px; }
+
+.hotkey-row { display: flex; gap: 8px; align-items: center; }
+.hotkey-row #hotkey { flex: 1; min-width: 0; }
+#record_hotkey.recording { background: #f0a500; color: #1a1a1a; }
+.hotkey-hint { font-size: 12px; color: #f0a500; margin: 4px 0 0; }

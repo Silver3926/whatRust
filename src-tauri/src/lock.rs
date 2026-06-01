@@ -52,9 +52,11 @@ pub fn require_unlocked(app: &AppHandle) -> Result<(), String> {
 /// Lock the app: mark locked, hide every user-facing window (recording which were
 /// visible), and show the lock screen.
 pub fn lock_now(app: &AppHandle) {
-    if let Some(state) = app.try_state::<LockState>() {
-        *state.unlocked.lock().unwrap() = false;
-    }
+    let state = match app.try_state::<LockState>() {
+        Some(s) => s,
+        None => return, // not yet set up — bail
+    };
+    *state.unlocked.lock().unwrap() = false;
     let mut hidden = Vec::new();
     for (label, w) in app.webview_windows() {
         if should_hide(&label) && w.is_visible().unwrap_or(false) {
@@ -62,25 +64,22 @@ pub fn lock_now(app: &AppHandle) {
             hidden.push(label);
         }
     }
-    if let Some(state) = app.try_state::<LockState>() {
-        *state.hidden.lock().unwrap() = hidden;
-    }
+    *state.hidden.lock().unwrap() = hidden;
     show_lock_window(app);
 }
 
 /// Unlock the app: mark unlocked, destroy the lock window, and restore the windows
 /// that were visible when we locked (or fall back to the active account).
 pub fn unlock(app: &AppHandle) {
-    if let Some(state) = app.try_state::<LockState>() {
-        *state.unlocked.lock().unwrap() = true;
-    }
+    let state = match app.try_state::<LockState>() {
+        Some(s) => s,
+        None => return, // not yet set up — bail
+    };
+    *state.unlocked.lock().unwrap() = true;
     if let Some(w) = app.get_webview_window("lock") {
         let _ = w.destroy();
     }
-    let hidden = app
-        .try_state::<LockState>()
-        .map(|s| std::mem::take(&mut *s.hidden.lock().unwrap()))
-        .unwrap_or_default();
+    let hidden = std::mem::take(&mut *state.hidden.lock().unwrap());
     if hidden.is_empty() {
         crate::window::show_active(app);
     } else {
@@ -136,6 +135,7 @@ mod tests {
     #[test]
     fn should_hide_never_hides_the_lock_window() {
         assert!(!should_hide("lock"));
+        assert!(!should_hide("some-future-internal-panel"));
     }
 
     #[test]

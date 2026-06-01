@@ -4607,7 +4607,6 @@ version = "0.2.0"
 dependencies = [
  "argon2",
  "objc2-foundation",
- "rand_core 0.6.4",
  "serde",
  "serde_json",
  "tauri",

@@ -64,9 +64,9 @@ pub fn save(app: &AppHandle, c: &AppLockConfig) -> tauri::Result<()> {
 /// version 0x13, with OWASP-baseline parameters. The random salt is embedded in the
 /// returned PHC string, so nothing else needs storing.
 pub fn hash_password(password: &str) -> Result<String, String> {
+    use argon2::password_hash::rand_core::OsRng;
     use argon2::password_hash::{PasswordHasher, SaltString};
     use argon2::Argon2;
-    use rand_core::OsRng;
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)
@@ -119,6 +119,12 @@ mod tests {
         assert!(c.lock_on_launch);
         assert!(!c.lock_on_hide);
         assert_eq!(c.idle_secs, 0);
+    }
+
+    #[test]
+    fn empty_json_is_all_defaults() {
+        let c: AppLockConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(c, AppLockConfig::default());
     }
 
     #[test]

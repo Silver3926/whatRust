@@ -270,6 +270,48 @@ pub fn show_main(app: &AppHandle) {
     show_active(app);
 }
 
+/// What a toggle should do given the active window's visibility.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ToggleAct {
+    Hide,
+    Show,
+}
+
+/// Pure toggle decision: a visible active window is hidden; anything else (a hidden
+/// window, or no active window at all → `None`) is shown.
+pub fn toggle_decision(active_visible: Option<bool>) -> ToggleAct {
+    match active_visible {
+        Some(true) => ToggleAct::Hide,
+        _ => ToggleAct::Show,
+    }
+}
+
+/// Toggle the active account window: hide it if visible, otherwise show + focus it.
+/// The "show" path goes through `show_active`, which defers to the lock screen when
+/// the app is locked — so a toggle (e.g. an OS-bound `whatrust --toggle` on Wayland,
+/// where in-process global hotkeys can't fire) can NEVER reveal an account window
+/// while locked. The "hide" path only triggers when an account window is visible,
+/// which cannot happen while locked.
+pub fn toggle_active(app: &AppHandle) {
+    let label = app
+        .try_state::<ActiveAccount>()
+        .map(|a| a.lock().unwrap().clone());
+    let visible = label
+        .as_ref()
+        .and_then(|l| app.get_webview_window(l))
+        .map(|w| w.is_visible().unwrap_or(false));
+    match toggle_decision(visible) {
+        ToggleAct::Hide => {
+            if let Some(l) = label {
+                if let Some(w) = app.get_webview_window(&l) {
+                    let _ = w.hide();
+                }
+            }
+        }
+        ToggleAct::Show => show_active(app),
+    }
+}
+
 /// Opens (or focuses) the local settings window.
 pub fn open_settings_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("settings") {
@@ -282,4 +324,24 @@ pub fn open_settings_window(app: &AppHandle) {
         .inner_size(440.0, 680.0)
         .resizable(false)
         .build();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{toggle_decision, ToggleAct};
+
+    #[test]
+    fn visible_active_window_is_hidden() {
+        assert_eq!(toggle_decision(Some(true)), ToggleAct::Hide);
+    }
+
+    #[test]
+    fn hidden_active_window_is_shown() {
+        assert_eq!(toggle_decision(Some(false)), ToggleAct::Show);
+    }
+
+    #[test]
+    fn no_active_window_is_shown() {
+        assert_eq!(toggle_decision(None), ToggleAct::Show);
+    }
 }

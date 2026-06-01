@@ -19,10 +19,15 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            // A 2nd launch normally raises the active account window — but NOT an
-            // autostart relaunch carrying --minimized (keep it hidden in the tray).
-            // show_main is a show_active shim (correction #5).
-            if !args.iter().any(|a| a == "--minimized") {
+            // `whatrust --toggle` (bind it to an OS keyboard shortcut — the reliable
+            // global-hotkey path on Wayland, where in-process X11 grabs don't fire)
+            // toggles the active window. Otherwise a 2nd launch raises it, except an
+            // autostart relaunch carrying --minimized (stay hidden in the tray).
+            // Both toggle_active and show_main defer to the lock screen when locked,
+            // so neither can bypass the app lock.
+            if args.iter().any(|a| a == "--toggle") {
+                window::toggle_active(app);
+            } else if !args.iter().any(|a| a == "--minimized") {
                 window::show_main(app);
             }
         }));
@@ -46,23 +51,10 @@ pub fn run() {
             .plugin(
                 tauri_plugin_global_shortcut::Builder::new()
                     .with_handler(|app, _shortcut, event| {
+                        // In-process global hotkey (X11 / Windows / macOS). On Wayland
+                        // this won't fire — use `whatrust --toggle` via an OS shortcut.
                         if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                            // Toggle the active account window.
-                            let label = app
-                                .try_state::<accounts::ActiveAccount>()
-                                .map(|a| a.lock().unwrap().clone());
-                            let visible = label
-                                .as_ref()
-                                .and_then(|l| app.get_webview_window(l))
-                                .map(|w| w.is_visible().unwrap_or(false));
-                            match (label, visible) {
-                                (Some(l), Some(true)) => {
-                                    if let Some(w) = app.get_webview_window(&l) {
-                                        let _ = w.hide();
-                                    }
-                                }
-                                _ => window::show_active(app),
-                            }
+                            window::toggle_active(app);
                         }
                     })
                     .build(),

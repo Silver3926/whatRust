@@ -1,4 +1,7 @@
 mod accounts;
+mod applock;
+mod biometric;
+mod lock;
 mod window;
 mod unread;
 mod settings;
@@ -84,6 +87,16 @@ pub fn run() {
             commands::remove_account,
             commands::rename_account,
             commands::open_account,
+            commands::get_lock_status,
+            commands::set_app_lock_password,
+            commands::change_app_lock_password,
+            commands::disable_app_lock,
+            commands::set_app_lock_options,
+            commands::set_biometric_enabled,
+            commands::lock_app,
+            commands::unlock_password,
+            commands::unlock_biometric,
+            commands::reset_app_lock,
         ])
         .setup(|app| {
             let handle = app.handle();
@@ -107,14 +120,49 @@ pub fn run() {
                 let _ = accounts::save(handle, &f);
             }
 
+            // App lock: decide the initial state and whether to start hidden.
+            let lock_cfg = applock::load(handle);
+            let lock_on_launch = lock_cfg.is_active() && lock_cfg.lock_on_launch;
+            handle.manage(lock::LockState::new(!lock_on_launch));
+            let open_hidden = start_hidden || lock_on_launch;
+
             // Open every account window so each one receives messages/notifications.
             for a in &f.accounts {
-                window::open_account_window(handle, a, start_hidden)?;
+                window::open_account_window(handle, a, open_hidden)?;
             }
 
             tray::setup(handle)?;
             tray::rebuild_menu(handle);
-            settings::apply(handle, &s);
+            let _ = settings::apply(handle, &s);
+
+            if lock_on_launch && !start_hidden {
+                lock::show_lock_window(handle);
+            }
+
+            // Idle auto-lock watcher. Always running; no-op unless the lock is active
+            // with idle_secs > 0 and the app is currently unlocked.
+            #[cfg(desktop)]
+            {
+                let idle_handle = handle.clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    let c = applock::load(&idle_handle);
+                    if !c.is_active() || c.idle_secs == 0 {
+                        continue;
+                    }
+                    if !lock::is_unlocked(&idle_handle) {
+                        continue;
+                    }
+                    let idle_ok = user_idle::UserIdle::get_time()
+                        .map(|t| t.as_seconds() >= c.idle_secs as u64)
+                        .unwrap_or(false);
+                    if idle_ok {
+                        let h = idle_handle.clone();
+                        let _ = idle_handle.run_on_main_thread(move || lock::lock_now(&h));
+                    }
+                });
+            }
+
             Ok(())
         })
         .build(tauri::generate_context!())

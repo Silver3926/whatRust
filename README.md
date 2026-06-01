@@ -20,6 +20,7 @@
 - [Why whatRust? A lean, native WhatsApp Desktop alternative](#why-whatrust-a-lean-native-whatsapp-desktop-alternative)
 - [Features](#features)
 - [Run multiple WhatsApp accounts](#run-multiple-whatsapp-accounts)
+- [Lock the app (optional)](#lock-the-app-optional)
 - [whatRust vs the official WhatsApp Desktop (Electron)](#whatrust-vs-the-official-whatsapp-desktop-electron)
 - [Requirements](#requirements)
 - [Installation](#installation)
@@ -47,6 +48,7 @@ The official WhatsApp Desktop app is built on Electron, which packs an entire Ch
 ## Features
 
 - **Multiple WhatsApp accounts** — run several numbers at once, each in its own window with a fully isolated login (add, rename, and remove accounts)
+- **Optional app lock** — password (Argon2id) or biometric (Windows Hello / Touch ID / Linux polkit); locks on launch, on demand, on hide-to-tray, or after idle
 - **System tray** icon with **close-to-tray** and an **unread message badge**
 - **Native OS notifications** for new messages
 - **Persistent login** — scan the QR code once, stay signed in across restarts
@@ -68,6 +70,25 @@ whatRust runs **multiple WhatsApp accounts at the same time** — each account o
 
 > **macOS note:** running **multiple accounts requires macOS 14 (Sonoma) or later**, where the system webview supports isolated data stores. On macOS 12–13 whatRust runs a single account. Linux and Windows have no such limit.
 
+## Lock the app (optional)
+
+whatRust can require a password — or a fingerprint / Windows Hello / Touch ID where your
+OS supports it — before showing your chats. Enable it under **Settings → Security**.
+
+- **Password** works on every platform (Argon2id, stored locally).
+- **Biometric** is an optional shortcut: Windows Hello on Windows, Touch ID on any Mac
+  that has it, and the system fingerprint dialog on Linux where polkit/`pam_fprintd` is
+  configured (native `.deb` install only; the AppImage falls back to the password).
+- Lock **on launch**, **on demand** (tray → *Lock now*), **when hidden to the tray**, or
+  **after an idle timeout** — each toggleable in Settings.
+- Forgot your password? **Reset** from the lock screen logs out all accounts and clears
+  the lock (you'll re-scan the QR). There is no backdoor.
+
+> **What the lock does and doesn't do:** it controls who can open whatRust's windows. It
+> does **not** encrypt your data on disk — your WhatsApp session stays readable to other
+> software running as your user, locked or not (the same posture as Signal Desktop). For
+> at-rest protection, use full-disk encryption (FileVault / BitLocker / LUKS).
+
 ## whatRust vs the official WhatsApp Desktop (Electron)
 
 | Feature | whatRust | Official WhatsApp Desktop (Electron) |
@@ -84,6 +105,7 @@ whatRust runs **multiple WhatsApp accounts at the same time** — each account o
 | Native notifications | ✅ Yes | ✅ Yes |
 | Voice messages & calls (mic/camera) | ✅ Yes | ✅ Yes |
 | Multiple accounts (isolated sessions) | ✅ Yes | ❌ No |
+| Optional app lock (password + biometric) | ✅ Yes | ❌ No |
 | Global show/hide shortcut | ✅ Yes | ❌ No |
 | Launch at startup | ✅ Yes | ✅ Yes |
 | Affiliated with Meta | ❌ No (unofficial) | ✅ Yes |
@@ -163,6 +185,10 @@ Yes. whatRust grants the webview microphone and camera access, so voice messages
 
 ### Can I use multiple WhatsApp accounts in whatRust?
 Yes. whatRust supports **multiple WhatsApp accounts** running at the same time — each opens in its own window with a fully isolated session, so different numbers stay logged in independently. Add, rename, and remove accounts from **Settings → Accounts**. On macOS this requires macOS 14 or later; Linux and Windows have no limit.
+
+### Does whatRust have an app lock?
+
+Yes. You can set a password under **Settings → Security** to require authentication before whatRust shows your chats. Biometric unlock (Windows Hello, Touch ID, or Linux polkit with an enrolled fingerprint) is an optional shortcut where the OS supports it. The lock controls window access — it does not encrypt data on disk (same posture as Signal Desktop). For at-rest protection use full-disk encryption.
 
 ### Does whatRust support the system tray and close-to-tray?
 Yes. It adds a system tray icon with an unread-message badge, can close to the tray, and forwards new messages to native OS notifications.

@@ -23,6 +23,8 @@ button {
   padding: 9px 18px; font-weight: 600; font-size: 14px; cursor: pointer;
 }
 button:hover { filter: brightness(1.05); }
+button.secondary { background: transparent; color: inherit; border: 1px solid #8886; }
+button.secondary:hover { filter: none; background: #8881; }
 .note { color: var(--green); font-weight: 600; }
 
 /* --- Accounts manager --- */
@@ -56,3 +58,10 @@ h2 { font-size: 14px; margin: 0 0 10px; font-weight: 600; }
 .add-row button:disabled { opacity: 0.4; cursor: not-allowed; }
 .macos-note { color: #c0392b; font-size: 12px; margin: 8px 0 0; }
 .macos-note[hidden] { display: none; }
+.lock-note { font-size: 12px; color: #8696a0; margin-top: 10px; line-height: 1.4; }
+#lock-enabled .field input[type="number"] { width: 80px; }
+
+.hotkey-row { display: flex; gap: 8px; align-items: center; }
+.hotkey-row #hotkey { flex: 1; min-width: 0; }
+#record_hotkey.recording { background: #f0a500; color: #1a1a1a; }
+.hotkey-hint { font-size: 12px; color: #f0a500; margin: 4px 0 0; }

@@ -48,8 +48,10 @@ pub fn save(app: &AppHandle, s: &Settings) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Apply side effects of settings (autostart + global shortcut).
-pub fn apply(app: &AppHandle, s: &Settings) {
+/// Apply side effects of settings (autostart + global shortcut). Returns the global-
+/// shortcut registration error as `Some(msg)` if registering failed; `None` if it
+/// registered successfully, or the shortcut is disabled/empty, or on non-desktop.
+pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
     #[cfg(desktop)]
     {
         use tauri_plugin_autostart::ManagerExt;
@@ -64,11 +66,18 @@ pub fn apply(app: &AppHandle, s: &Settings) {
         let gs = app.global_shortcut();
         let _ = gs.unregister_all();
         if s.hotkey_enabled && !s.hotkey.trim().is_empty() {
-            let _ = gs.register(s.hotkey.as_str());
+            return match gs.register(s.hotkey.as_str()) {
+                Ok(_) => None,
+                Err(e) => Some(e.to_string()),
+            };
         }
+        None
     }
     #[cfg(not(desktop))]
-    let _ = (app, s);
+    {
+        let _ = (app, s);
+        None
+    }
 }
 
 #[cfg(test)]

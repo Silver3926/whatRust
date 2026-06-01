@@ -46,7 +46,10 @@ pub fn open_account_window(
     win.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             if crate::settings::load(&app_handle).close_to_tray {
-                if let Some(w) = app_handle.get_webview_window(&label_for_close) {
+                let lc = crate::applock::load(&app_handle);
+                if lc.is_active() && lc.lock_on_hide {
+                    crate::lock::lock_now(&app_handle);
+                } else if let Some(w) = app_handle.get_webview_window(&label_for_close) {
                     let _ = w.hide();
                 }
                 api.prevent_close();
@@ -231,6 +234,12 @@ pub fn show_account(app: &AppHandle, label: &str) {
 /// Show the active (last-focused) account window. Falls back to the first existing
 /// account window, then the settings window.
 pub fn show_active(app: &AppHandle) {
+    // If the app is locked, any "reveal" request shows the lock screen, never an
+    // account window. Covers tray click, global shortcut, single-instance, macOS Reopen.
+    if !crate::lock::is_unlocked(app) {
+        crate::lock::show_lock_window(app);
+        return;
+    }
     if let Some(active) = app.try_state::<ActiveAccount>() {
         let label = active.lock().unwrap().clone();
         if app.get_webview_window(&label).is_some() {

@@ -54,8 +54,8 @@ The official WhatsApp Desktop app is built on Electron, which packs an entire Ch
 - **Persistent login** — scan the QR code once, stay signed in across restarts
 - **Voice messages, voice calls, and video calls** — microphone and camera support
 - **Launch at startup** (auto-start), optional
-- **Global keyboard shortcut** to show/hide the window (default `Ctrl/Cmd+Shift+W`)
-- **Single instance** — relaunching focuses the running window instead of opening a second
+- **Global keyboard shortcut** to show/hide the window (default `Ctrl/Cmd+Shift+W`; record your own by pressing the keys in Settings). On **Wayland**, bind `whatrust --toggle` to a system shortcut instead — see the FAQ.
+- **Single instance** — relaunching focuses the running window; `whatrust --toggle` from a second launch shows/hides it
 - **Remembers window size and position**
 - **One-line install** on every platform
 - **Cross-platform**: Linux, Windows, and macOS from one Rust + Tauri codebase
@@ -189,6 +189,15 @@ Yes. whatRust supports **multiple WhatsApp accounts** running at the same time �
 ### Does whatRust have an app lock?
 
 Yes. You can set a password under **Settings → Security** to require authentication before whatRust shows your chats. Biometric unlock (Windows Hello, Touch ID, or Linux polkit with an enrolled fingerprint) is an optional shortcut where the OS supports it. The lock controls window access — it does not encrypt data on disk (same posture as Signal Desktop). For at-rest protection use full-disk encryption.
+
+### The global show/hide shortcut doesn't work on my Linux desktop (Wayland)
+
+Wayland blocks apps from grabbing global hotkeys, so whatRust's built-in shortcut can't fire on a Wayland session (GNOME, KDE Plasma's Wayland, etc.) — this is a platform limitation, not specific to whatRust. The reliable approach is to let your desktop own the keybinding and have it toggle whatRust:
+
+1. **Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts → +** (GNOME; KDE has an equivalent under *Custom Shortcuts*)
+2. Name it `whatRust`, set the command to `whatrust --toggle`, and assign your key (e.g. `Ctrl+Shift+W`).
+
+`whatrust --toggle` shows the window if it's hidden and hides it if it's visible — a true toggle that works on Wayland. (The built-in shortcut still works on X11, Windows, and macOS.)
 
 ### Does whatRust support the system tray and close-to-tray?
 Yes. It adds a system tray icon with an unread-message badge, can close to the tray, and forwards new messages to native OS notifications.

@@ -8,6 +8,7 @@ mod settings;
 mod tray;
 mod commands;
 mod notify;
+mod aumid;
 
 use tauri::Manager;
 
@@ -92,6 +93,12 @@ pub fn run() {
         ])
         .setup(|app| {
             let handle = app.handle();
+
+            // Windows: register our AppUserModelID so WinRT toast notifications
+            // actually render for the installed app (no-op elsewhere). Must run
+            // before any account window can fire a notification. See aumid.rs.
+            aumid::register(handle);
+
             let s = settings::load(handle);
             let args: Vec<String> = std::env::args().collect();
             let start_hidden = s.start_minimized || args.iter().any(|a| a == "--minimized");

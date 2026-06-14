@@ -22,13 +22,21 @@ fn is_remote_label(label: &str) -> bool {
 
 #[tauri::command]
 pub fn notify(window: tauri::Window, app: tauri::AppHandle, title: String, body: String) {
+    // issue #3 diagnostics: confirm the command is actually reached from the
+    // injected bridge. If this line never appears in the log when a message
+    // arrives, the page never called our Notification shim (e.g. it used the
+    // service-worker showNotification path), not the OS toast layer. No message
+    // content is logged (PII) — only that an event occurred.
+    crate::dlog::log("commands::notify invoked");
     // While locked, suppress notifications entirely so message previews don't leak
     // to the OS notification center / lock screen. The tray unread badge still updates
     // via set_unread (a count only, no content).
     if !crate::lock::is_unlocked(&app) {
+        crate::dlog::log("commands::notify suppressed: app is locked");
         return;
     }
     if !crate::settings::load(&app).notifications {
+        crate::dlog::log("commands::notify suppressed: notifications disabled in settings");
         return;
     }
     // Prefix the account name when more than one account exists, so notifications

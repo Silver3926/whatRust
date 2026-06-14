@@ -52,14 +52,22 @@ mod win {
     pub fn register(aumid: &str, display_name: &str) {
         // Step 1 — the registry entry is what makes the Action Center render
         // the toast for an unpackaged desktop app.
-        if let Err(e) = write_registry(aumid, display_name) {
-            eprintln!("[whatrust] AUMID registry registration failed: {e:?}");
+        match write_registry(aumid, display_name) {
+            Ok(()) => crate::dlog::log(&format!(
+                "aumid: HKCU\\Software\\Classes\\AppUserModelId\\{aumid} registered"
+            )),
+            Err(e) => crate::dlog::log(&format!("aumid: registry registration FAILED: {e:?}")),
         }
         // Step 2 — pin this process to the AUMID (taskbar grouping + toast
         // attribution). Harmless if it fails; we just log.
         let id = wide(aumid);
-        if let Err(e) = unsafe { SetCurrentProcessExplicitAppUserModelID(PCWSTR(id.as_ptr())) } {
-            eprintln!("[whatrust] SetCurrentProcessExplicitAppUserModelID failed: {e:?}");
+        match unsafe { SetCurrentProcessExplicitAppUserModelID(PCWSTR(id.as_ptr())) } {
+            Ok(()) => crate::dlog::log(&format!(
+                "aumid: SetCurrentProcessExplicitAppUserModelID({aumid}) ok"
+            )),
+            Err(e) => crate::dlog::log(&format!(
+                "aumid: SetCurrentProcessExplicitAppUserModelID FAILED: {e:?}"
+            )),
         }
     }
 

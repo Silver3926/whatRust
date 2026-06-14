@@ -9,6 +9,7 @@ mod tray;
 mod commands;
 mod notify;
 mod aumid;
+mod dlog;
 
 use tauri::Manager;
 
@@ -93,6 +94,11 @@ pub fn run() {
         ])
         .setup(|app| {
             let handle = app.handle();
+
+            // Start a fresh diagnostic log for this launch (issue #3): the only
+            // way to see notification failures on a Windows GUI build with no
+            // console. See dlog.rs.
+            dlog::init();
 
             // Windows: register our AppUserModelID so WinRT toast notifications
             // actually render for the installed app (no-op elsewhere). Must run

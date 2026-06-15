@@ -35,18 +35,15 @@ pub fn open_account_window(
         .icon(icon)?
         .user_agent(CHROME_UA)
         .initialization_script(BRIDGE_JS)
-        // Let WhatsApp Web receive dropped files/images. By default wry installs an
-        // OS-level drag-and-drop handler that swallows the native drop (firing
-        // `tauri://drag-drop` instead), so the page's HTML5 dragover/drop never fires
-        // and dropping a file does nothing. We don't use Tauri's drag-drop events, so
-        // disabling that handler lets the webview hand drops straight to web.whatsapp.com.
-        // This is also what makes HTML5 DnD work at all in WebView2 on Windows.
-        .disable_drag_drop_handler()
-        // Linux/webkit2gtk safety net: even with the OS handler off, a dropped file can
-        // make the webview *navigate* to its file:// URL (tauri#9725, #12052) — which
-        // would blow away the live WhatsApp session. WhatsApp Web never legitimately
-        // loads a file:// URL, so cancel any such navigation; the in-page HTML5 drop
-        // (which is what actually attaches the file) still fires.
+        // Drag-and-drop is done by capturing the OS drop in Rust and injecting the file
+        // into the page (see `register_drop_handler` + bridge.js `__whatrustHandleDrop`).
+        // We deliberately KEEP Tauri's drag-drop handler enabled: on Linux/webkit2gtk the
+        // native webview never delivers a file drop into the page DOM (broken on Wayland;
+        // on X11 the GTK drop is accepted — the "+" cursor shows — but it still never
+        // reaches WhatsApp Web), so relying on in-page HTML5 drop simply does not work
+        // there. The handler is what hands us the dropped paths via `WindowEvent::DragDrop`.
+        // Belt-and-braces: cancel any `file://` navigation so a stray drop can never
+        // navigate the window away and tear down the live WhatsApp session.
         .on_navigation(|url| url.scheme() != "file")
         .visible(!start_hidden);
 
@@ -71,8 +68,162 @@ pub fn open_account_window(
     });
 
     register_focus_listener(app, &win);
+    register_drop_handler(&win);
     enable_webview_media(&win);
     Ok(win)
+}
+
+/// Largest single dropped file we will inline-inject into the page. base64 over `eval`
+/// is ~1.33x the byte size and held in memory, so keep it bounded; larger files are
+/// skipped (with a log line) rather than risking an OOM or a long UI stall.
+const MAX_DROP_FILE_BYTES: u64 = 100 * 1024 * 1024;
+/// Cap how many files one drop can inject (WhatsApp itself limits a batch anyway).
+const MAX_DROP_FILES: usize = 30;
+
+/// Capture OS file drops and inject them into WhatsApp Web.
+///
+/// On Linux the webview never delivers the drop into the page DOM, so Tauri's
+/// drag-drop handler (kept enabled in the builder) is our only source of the dropped
+/// paths. We read the files off the UI thread, base64-encode them, and `eval` a call
+/// to the page-side `__whatrustHandleDrop` (defined in bridge.js), which rebuilds the
+/// `File`s and hands them to WhatsApp's own attach flow. Every boundary is logged to
+/// the diagnostic log (see dlog.rs) so a failure can be pinpointed without a console.
+fn register_drop_handler(win: &WebviewWindow) {
+    let win = win.clone();
+    win.clone().on_window_event(move |event| {
+        let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, position }) = event
+        else {
+            return;
+        };
+        crate::dlog::log(&format!(
+            "dragdrop: Drop {} path(s) at ({:.0},{:.0})",
+            paths.len(),
+            position.x,
+            position.y
+        ));
+        let paths = paths.clone();
+        let (x, y) = (position.x, position.y);
+        let w = win.clone();
+        // Read + encode off the UI thread: a large video would otherwise stall the window.
+        std::thread::spawn(move || match build_drop_payload(&paths) {
+            Some(json) if json != "[]" => {
+                let js = format!(
+                    "window.__whatrustHandleDrop&&window.__whatrustHandleDrop({json},{x},{y});"
+                );
+                match w.eval(&js) {
+                    Ok(()) => crate::dlog::log("dragdrop: injection dispatched to page"),
+                    Err(e) => crate::dlog::log(&format!("dragdrop: eval failed: {e}")),
+                }
+            }
+            _ => crate::dlog::log("dragdrop: nothing injectable (empty/too large/unreadable)"),
+        });
+    });
+}
+
+/// Read the dropped files into a JSON array `[{name,type,b64}]` for the page-side
+/// injector. Skips anything too large, non-regular, or unreadable (logging each skip).
+fn build_drop_payload(paths: &[std::path::PathBuf]) -> Option<String> {
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    for p in paths.iter().take(MAX_DROP_FILES) {
+        let name = p
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let meta = match std::fs::metadata(p) {
+            Ok(m) => m,
+            Err(e) => {
+                crate::dlog::log(&format!("dragdrop: stat '{name}' failed: {e}"));
+                continue;
+            }
+        };
+        if !meta.is_file() {
+            crate::dlog::log(&format!("dragdrop: skip '{name}': not a regular file"));
+            continue;
+        }
+        if meta.len() > MAX_DROP_FILE_BYTES {
+            crate::dlog::log(&format!(
+                "dragdrop: skip '{name}': {} bytes over the {MAX_DROP_FILE_BYTES} cap",
+                meta.len()
+            ));
+            continue;
+        }
+        match std::fs::read(p) {
+            Ok(bytes) => {
+                crate::dlog::log(&format!("dragdrop: read '{name}' ({} bytes)", bytes.len()));
+                items.push(serde_json::json!({
+                    "name": name,
+                    "type": mime_for(&name),
+                    "b64": base64_encode(&bytes),
+                }));
+            }
+            Err(e) => crate::dlog::log(&format!("dragdrop: read '{name}' failed: {e}")),
+        }
+    }
+    serde_json::to_string(&items).ok()
+}
+
+/// Best-effort MIME from the file extension, so WhatsApp routes images/videos/docs to
+/// the right composer. Unknown types fall back to a generic binary type (still sends).
+fn mime_for(name: &str) -> &'static str {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" | "jfif" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "heic" => "image/heic",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
+        "3gp" => "video/3gpp",
+        "avi" => "video/x-msvideo",
+        "mp3" => "audio/mpeg",
+        "ogg" | "oga" => "audio/ogg",
+        "opus" => "audio/opus",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "pdf" => "application/pdf",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "txt" | "log" => "text/plain",
+        "csv" => "text/csv",
+        "zip" => "application/zip",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Standard base64 (RFC 4648, with `=` padding). Hand-rolled to avoid pulling a crate
+/// into this otherwise lean dependency tree; only used to ferry dropped bytes to the page.
+fn base64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            T[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 /// Track the last-focused account window in `ActiveAccount`. Registered once per
@@ -341,7 +492,34 @@ pub fn open_settings_window(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{toggle_decision, ToggleAct};
+    use super::{base64_encode, mime_for, toggle_decision, ToggleAct};
+
+    #[test]
+    fn base64_matches_rfc4648_vectors() {
+        // The canonical RFC 4648 test vectors, including every padding case.
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn base64_handles_high_bytes() {
+        assert_eq!(base64_encode(&[0xff, 0xff, 0xff]), "////");
+        assert_eq!(base64_encode(&[0x00]), "AA==");
+    }
+
+    #[test]
+    fn mime_is_extension_and_case_insensitive() {
+        assert_eq!(mime_for("Photo.JPG"), "image/jpeg");
+        assert_eq!(mime_for("clip.mp4"), "video/mp4");
+        assert_eq!(mime_for("doc.pdf"), "application/pdf");
+        assert_eq!(mime_for("noext"), "application/octet-stream");
+        assert_eq!(mime_for("archive.unknownext"), "application/octet-stream");
+    }
 
     #[test]
     fn visible_active_window_is_hidden() {

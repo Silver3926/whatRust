@@ -73,6 +73,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::notify,
             commands::set_unread,
+            commands::dlog,
             commands::get_settings,
             commands::set_settings,
             commands::open_settings,

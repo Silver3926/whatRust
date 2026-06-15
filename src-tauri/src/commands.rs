@@ -58,6 +58,16 @@ pub fn notify(window: tauri::Window, app: tauri::AppHandle, title: String, body:
     crate::notify::show(&app, &title, &body);
 }
 
+/// Diagnostic breadcrumb from the injected page script (bridge.js) into the same
+/// file log as the Rust side, so a drag-drop failure can be traced end-to-end on a
+/// build with no console. Allowed from the WhatsApp page; it only appends a short,
+/// length-capped string we author in bridge.js — no page-controlled PII.
+#[tauri::command]
+pub fn dlog(msg: String) {
+    let msg: String = msg.chars().take(300).collect();
+    crate::dlog::log(&format!("js: {msg}"));
+}
+
 #[tauri::command]
 pub fn set_unread(window: tauri::Window, app: tauri::AppHandle, title: String) {
     let count = crate::unread::parse_unread(&title);

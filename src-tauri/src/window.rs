@@ -35,6 +35,19 @@ pub fn open_account_window(
         .icon(icon)?
         .user_agent(CHROME_UA)
         .initialization_script(BRIDGE_JS)
+        // Let WhatsApp Web receive dropped files/images. By default wry installs an
+        // OS-level drag-and-drop handler that swallows the native drop (firing
+        // `tauri://drag-drop` instead), so the page's HTML5 dragover/drop never fires
+        // and dropping a file does nothing. We don't use Tauri's drag-drop events, so
+        // disabling that handler lets the webview hand drops straight to web.whatsapp.com.
+        // This is also what makes HTML5 DnD work at all in WebView2 on Windows.
+        .disable_drag_drop_handler()
+        // Linux/webkit2gtk safety net: even with the OS handler off, a dropped file can
+        // make the webview *navigate* to its file:// URL (tauri#9725, #12052) — which
+        // would blow away the live WhatsApp session. WhatsApp Web never legitimately
+        // loads a file:// URL, so cancel any such navigation; the in-page HTML5 drop
+        // (which is what actually attaches the file) still fires.
+        .on_navigation(|url| url.scheme() != "file")
         .visible(!start_hidden);
 
     let builder = apply_isolation(builder, account, app);

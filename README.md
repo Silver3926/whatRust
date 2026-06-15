@@ -53,6 +53,7 @@ The official WhatsApp Desktop app is built on Electron, which packs an entire Ch
 - **Native OS notifications** for new messages
 - **Persistent login** — scan the QR code once, stay signed in across restarts
 - **Voice messages, voice calls, and video calls** — microphone and camera support
+- **Drag and drop files and images** — drop a photo, video, or document straight onto a chat to attach it
 - **Launch at startup** (auto-start), optional
 - **Global keyboard shortcut** to show/hide the window (default `Ctrl/Cmd+Shift+W`; record your own by pressing the keys in Settings). On **Wayland**, bind `whatrust --toggle` to a system shortcut instead — see the FAQ.
 - **Single instance** — relaunching focuses the running window; `whatrust --toggle` from a second launch shows/hides it

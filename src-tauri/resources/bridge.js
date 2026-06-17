@@ -99,19 +99,20 @@
   //    so Rust captures the drop (window.rs `register_drop_handler`) and calls this with
   //    the file bytes. We rebuild the File(s) and hand them to WhatsApp's own attach flow.
   //
-  //    Primary: a hidden <input type=file> — `input.files` is settable in WebKit and
-  //    React fires onChange for synthetic, bubbling events (it never checks isTrusted).
-  //    Fallback: a synthetic drop. In WebKit `new DragEvent('drop',{dataTransfer})` drops
-  //    the dataTransfer, so we dispatch a plain Event with `dataTransfer` defined via
-  //    Object.defineProperty (the Cypress/Playwright WebKit workaround).
-  //    WhatsApp opens a preview/Send composer (never auto-sends), so attempting both is safe.
-  //    Every boundary is logged through the `dlog` command (see commands.rs).
+  //    WhatsApp Web keeps a sticker-creator <input type=file> (image-only accept) ALWAYS
+  //    mounted, but mounts the real "Photos & videos" input (accept includes video) and
+  //    the "Document" input (accept "*") only when the attach (+) menu is opened. Targeting
+  //    a file input blindly therefore lands on the sticker input — which turns photos into
+  //    stickers and rejects video/documents. So we ROUTE BY TYPE: open the attach menu to
+  //    mount the right input, then set its .files and fire change (React's onChange fires
+  //    for synthetic bubbling events; it doesn't check isTrusted, and input.files is
+  //    settable in WebKit). Images + native videos -> media input; everything else (zip,
+  //    pdf, docs, webm/mkv/avi) -> document input. We never use the sticker input.
   try {
     var drop = {};
     drop.log = function (m) {
-      try {
-        invoke("dlog", { msg: String(m).slice(0, 280) });
-      } catch (e) {}
+      try { console.log("[whatRust drop] " + m); } catch (e) {}
+      try { invoke("dlog", { msg: String(m).slice(0, 280) }); } catch (e) {}
     };
     drop.b64ToFile = function (b64, name, type) {
       var bin = atob(b64),
@@ -125,16 +126,117 @@
       for (var i = 0; i < files.length; i++) dt.items.add(files[i]);
       return dt;
     };
-    // WhatsApp opens a media preview / caption composer once a file is attached; use it
-    // as the success signal. Selectors are best-effort across WhatsApp Web versions.
+    // Only these video types are accepted by WhatsApp's Photos & Videos input; other
+    // video containers (webm/mkv/avi) are rejected there and must go as a document.
+    drop.NATIVE_VIDEO = { "video/mp4": 1, "video/3gpp": 1, "video/quicktime": 1 };
+    drop.isMedia = function (type) {
+      return /^image\//.test(type || "") || drop.NATIVE_VIDEO[type] === 1;
+    };
+    drop.qs = function (sels) {
+      for (var i = 0; i < sels.length; i++) {
+        var e = document.querySelector(sels[i]);
+        if (e) return e;
+      }
+      return null;
+    };
+    // The media input is the only file input whose accept lists a video type; the sticker
+    // input is image-only, so it can never match this.
+    drop.findMediaInput = function () {
+      var ins = document.querySelectorAll('input[type="file"]');
+      for (var i = 0; i < ins.length; i++) {
+        if (/video/i.test(ins[i].accept || "")) return ins[i];
+      }
+      return null;
+    };
+    // The document input accepts everything (accept "*"/""/no image+video). The sticker
+    // input (image-only) and media input (has video) are both excluded.
+    drop.findDocInput = function () {
+      var ins = document.querySelectorAll('input[type="file"]');
+      for (var i = 0; i < ins.length; i++) {
+        var a = (ins[i].accept || "").trim();
+        if (a === "" || a === "*" || a === "*/*") return ins[i];
+        if (!/image/i.test(a) && !/video/i.test(a)) return ins[i];
+      }
+      return null;
+    };
+    drop.openMenu = function () {
+      var b = drop.qs([
+        '[data-icon="plus"]',
+        '[data-icon="attach-menu-plus"]',
+        '[data-icon="clip"]',
+        '[data-testid="clip"]',
+        'button[title="Attach"]',
+        '[aria-label="Attach"]',
+        '[title="Attach"]',
+      ]);
+      if (!b) return false;
+      (b.closest('button,[role="button"],div[role="button"]') || b).click();
+      return true;
+    };
+    drop.clickMenuItem = function (kind) {
+      var sels =
+        kind === "media"
+          ? ['[data-testid="attach-image"]', '[data-icon="media-multiple"]', '[aria-label*="Photos"]', '[aria-label*="hoto"]']
+          : ['[data-testid="attach-document"]', '[data-icon="document"]', '[aria-label*="Document"]', '[aria-label*="ocument"]'];
+      var e = drop.qs(sels);
+      if (!e) return false;
+      (e.closest('li,button,[role="button"],div[role="button"]') || e).click();
+      return true;
+    };
+    drop.poll = function (fn, ms) {
+      return new Promise(function (resolve) {
+        var t0 = Date.now();
+        (function p() {
+          var r = fn();
+          if (r) return resolve(r);
+          if (Date.now() - t0 >= ms) return resolve(null);
+          setTimeout(p, 60);
+        })();
+      });
+    };
+    drop.inject = function (input, files) {
+      var dt = drop.dataTransfer(files);
+      try {
+        input.files = dt.files; // settable in WebKit + Blink (WHATWG html#2861)
+      } catch (e) {
+        drop.log("input.files assign threw: " + e);
+        return false;
+      }
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      return true;
+    };
+    // Open the attach menu (which mounts the lazily-rendered inputs) and inject into the
+    // one matching `kind`. If opening the menu alone doesn't mount it, click the matching
+    // submenu item to force it. No user gesture exists here, so the OS file picker can't
+    // open — only the input element is mounted, which is all we need.
+    drop.mountAndInject = function (kind, files) {
+      var find = kind === "media" ? drop.findMediaInput : drop.findDocInput;
+      var existing = find();
+      if (existing) {
+        drop.log(kind + " input already present");
+        return Promise.resolve(drop.inject(existing, files));
+      }
+      drop.openMenu();
+      return drop.poll(find, 1000).then(function (input) {
+        if (input) return drop.inject(input, files);
+        drop.clickMenuItem(kind);
+        return drop.poll(find, 1000).then(function (input2) {
+          if (input2) return drop.inject(input2, files);
+          drop.log(kind + " input NOT found after opening attach menu");
+          return false;
+        });
+      });
+    };
+    // WhatsApp opens a media/document preview composer once a file is attached; use it as
+    // the success signal for diagnostics. Best-effort selectors across WA Web versions.
     drop.composerOpen = function () {
       return !!(
         document.querySelector('[data-testid="media-caption-input-container"]') ||
         document.querySelector('[data-testid="media-editor"]') ||
         document.querySelector('[data-animate-modal-body="true"]') ||
         document.querySelector('span[data-icon="send"]') ||
-        document.querySelector('span[data-icon="media-cancel"]') ||
-        document.querySelector('span[data-icon="x-viewer"]')
+        document.querySelector('span[data-icon="media-cancel"]')
       );
     };
     drop.waitFor = function (pred, ms) {
@@ -146,52 +248,6 @@
           setTimeout(poll, 80);
         })();
       });
-    };
-    drop.tryFileInput = function (dt) {
-      var sels = [
-        'input[type="file"][accept*="image"][accept*="video"]',
-        'input[type="file"][accept*="image"]',
-        'input[type="file"][accept]',
-        'input[type="file"]',
-      ];
-      var input = null;
-      for (var i = 0; i < sels.length && !input; i++) {
-        input = document.querySelector(sels[i]);
-      }
-      if (!input) return false;
-      try {
-        input.files = dt.files; // settable in WebKit + Blink (WHATWG html#2861)
-      } catch (e) {
-        drop.log("input.files assign threw: " + e);
-        return false;
-      }
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      drop.log("file-input path fired (" + dt.files.length + " file)");
-      return true;
-    };
-    drop.tryDrop = function (dt, cssX, cssY) {
-      var target = null;
-      var el = document.elementFromPoint(cssX, cssY);
-      if (el && el !== document.documentElement && el !== document.body) target = el;
-      if (!target) {
-        target =
-          document.querySelector('[data-testid="conversation-panel-body"]') ||
-          document.querySelector("div#main") ||
-          document.querySelector("main") ||
-          document.body;
-      }
-      var fire = function (type) {
-        var ev = new Event(type, { bubbles: true, cancelable: true });
-        try {
-          Object.defineProperty(ev, "dataTransfer", { value: dt, configurable: true });
-        } catch (e) {}
-        target.dispatchEvent(ev);
-      };
-      fire("dragenter");
-      fire("dragover");
-      fire("drop");
-      drop.log("synthetic-drop fired on " + (target.id || target.tagName));
     };
     // De-dupe: a given file can't be re-injected within 4s (guards eval retries).
     drop.seen = Object.create(null);
@@ -207,7 +263,7 @@
       });
     };
 
-    window.__whatrustHandleDrop = function (fileObjs, physX, physY) {
+    window.__whatrustHandleDrop = function (fileObjs) {
       try {
         if (!Array.isArray(fileObjs) || fileObjs.length === 0) return;
         var fresh = drop.dedupe(fileObjs);
@@ -215,45 +271,34 @@
           drop.log("duplicate drop ignored");
           return;
         }
-        var dpr = window.devicePixelRatio || 1;
-        var cssX = physX / dpr,
-          cssY = physY / dpr;
         var files = fresh.map(function (f) {
           return drop.b64ToFile(f.b64, f.name, f.type);
         });
-        var dt = drop.dataTransfer(files);
-        drop.log(
-          "received " +
-            files.length +
-            " file(s) [" +
-            files
-              .map(function (f) {
-                return f.type;
-              })
-              .join(",") +
-            "]"
-        );
+        var media = files.filter(function (f) {
+          return drop.isMedia(f.type);
+        });
+        var docs = files.filter(function (f) {
+          return !drop.isMedia(f.type);
+        });
+        drop.log("drop: " + media.length + " media + " + docs.length + " document file(s)");
 
-        var dropFallback = function (reason) {
-          drop.log("fallback to synthetic drop (" + reason + ")");
-          drop.tryDrop(dt, cssX, cssY);
-          drop.waitFor(drop.composerOpen, 1800).then(function (ok) {
-            drop.log(ok ? "composer opened via synthetic drop" : "composer NOT detected after synthetic drop");
+        // A single drop opens one composer, so handle one group. Media wins if both are
+        // present (the rarer mixed case logs the leftover for a follow-up drop).
+        var kind = media.length ? "media" : "document";
+        var batch = media.length ? media : docs;
+        drop.mountAndInject(kind, batch).then(function (ok) {
+          drop.log(kind + " inject " + (ok ? "dispatched" : "FAILED"));
+          if (media.length && docs.length) {
+            drop.log("note: " + docs.length + " document(s) skipped — drop them separately");
+          }
+          drop.waitFor(drop.composerOpen, 1800).then(function (open) {
+            drop.log("composer " + (open ? "opened" : "NOT detected") + " (" + kind + ")");
           });
-        };
-
-        if (drop.tryFileInput(dt)) {
-          drop.waitFor(drop.composerOpen, 1500).then(function (ok) {
-            if (ok) drop.log("composer opened via file-input");
-            else dropFallback("file-input fired but composer not detected");
-          });
-        } else {
-          dropFallback("no file input present");
-        }
+        });
       } catch (e) {
         drop.log("handler error: " + e);
       }
     };
-    drop.log("drop injector ready");
+    drop.log("drop injector v2 (type-routed) ready");
   } catch (e) {}
 })();

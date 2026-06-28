@@ -296,8 +296,10 @@ fn base64_encode_into(out: &mut String, data: &[u8]) {
     }
 }
 
-/// Standard base64 of `data` as an owned `String`. Thin wrapper over [`base64_encode_into`];
-/// retained for callers/tests that want the whole encoding at once.
+/// Standard base64 of `data` as an owned `String`. Thin wrapper over [`base64_encode_into`].
+/// Only the streaming `append_file_base64` is used in production now, so this whole-buffer
+/// form is exercised by the tests (as the parity oracle) — hence `cfg(test)`.
+#[cfg(test)]
 fn base64_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     base64_encode_into(&mut out, data);

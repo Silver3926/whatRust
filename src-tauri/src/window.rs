@@ -122,8 +122,16 @@ fn register_drop_handler(win: &WebviewWindow) {
 
 /// Read the dropped files into a JSON array `[{name,type,b64}]` for the page-side
 /// injector. Skips anything too large, non-regular, or unreadable (logging each skip).
+///
+/// Memory: each file's base64 is streamed straight into the shared output buffer (see
+/// [`append_file_base64`]), reading the file in bounded chunks. A large video is therefore
+/// never simultaneously resident as raw bytes *and* a base64 `String` *and* a
+/// `serde_json::Value` *and* the serialized output (the old path held ~4 full copies — a
+/// 100 MB drop peaked near half a gigabyte). Peak extra allocation is now ~1.33x the base64
+/// of the single largest file (the transport itself) plus a fixed 48 KiB read buffer.
 fn build_drop_payload(paths: &[std::path::PathBuf]) -> Option<String> {
-    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut out = String::from("[");
+    let mut wrote_any = false;
     for p in paths.iter().take(MAX_DROP_FILES) {
         let name = p
             .file_name()
@@ -148,19 +156,36 @@ fn build_drop_payload(paths: &[std::path::PathBuf]) -> Option<String> {
             ));
             continue;
         }
-        match std::fs::read(p) {
-            Ok(bytes) => {
-                crate::dlog::log(&format!("dragdrop: read '{name}' ({} bytes)", bytes.len()));
-                items.push(serde_json::json!({
-                    "name": name,
-                    "type": mime_for(&name),
-                    "b64": base64_encode(&bytes),
-                }));
+        // Rollback point: if the file read fails partway through streaming its base64, we
+        // truncate the half-written object (and its leading separator) so `out` stays valid
+        // JSON. serde_json escapes the name/type strings; base64's alphabet (A-Za-z0-9+/=)
+        // needs no JSON escaping, so it is written raw between the quotes.
+        let mark = out.len();
+        if wrote_any {
+            out.push(',');
+        }
+        out.push_str("{\"name\":");
+        out.push_str(&serde_json::to_string(&name).unwrap_or_else(|_| "\"file\"".to_string()));
+        out.push_str(",\"type\":");
+        out.push_str(
+            &serde_json::to_string(mime_for(&name))
+                .unwrap_or_else(|_| "\"application/octet-stream\"".to_string()),
+        );
+        out.push_str(",\"b64\":\"");
+        match append_file_base64(&mut out, p) {
+            Ok(n) => {
+                out.push_str("\"}");
+                wrote_any = true;
+                crate::dlog::log(&format!("dragdrop: read '{name}' ({n} bytes)"));
             }
-            Err(e) => crate::dlog::log(&format!("dragdrop: read '{name}' failed: {e}")),
+            Err(e) => {
+                out.truncate(mark);
+                crate::dlog::log(&format!("dragdrop: read '{name}' failed: {e}"));
+            }
         }
     }
-    serde_json::to_string(&items).ok()
+    out.push(']');
+    Some(out)
 }
 
 /// Best-effort MIME from the file extension, so WhatsApp routes images/videos/docs to
@@ -200,11 +225,16 @@ fn mime_for(name: &str) -> &'static str {
     }
 }
 
-/// Standard base64 (RFC 4648, with `=` padding). Hand-rolled to avoid pulling a crate
-/// into this otherwise lean dependency tree; only used to ferry dropped bytes to the page.
-fn base64_encode(data: &[u8]) -> String {
+/// Append the standard base64 (RFC 4648, with `=` padding) of `data` to `out`. Hand-rolled
+/// to avoid pulling a crate into this otherwise lean dependency tree.
+///
+/// Encodes per 3-byte group, padding only a final partial group. Callers that feed data
+/// across multiple calls (streaming) MUST pass whole 3-byte groups on every call except the
+/// last — otherwise an interior partial group would be padded mid-stream. [`append_file_base64`]
+/// upholds that contract via a small carry buffer.
+fn base64_encode_into(out: &mut String, data: &[u8]) {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    out.reserve(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = *chunk.get(1).unwrap_or(&0) as u32;
@@ -223,7 +253,67 @@ fn base64_encode(data: &[u8]) -> String {
             '='
         });
     }
+}
+
+/// Standard base64 of `data` as an owned `String`. Thin wrapper over [`base64_encode_into`];
+/// retained for callers/tests that want the whole encoding at once.
+fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    base64_encode_into(&mut out, data);
     out
+}
+
+/// Append the base64 of the file at `path` to `out`, reading in bounded 48 KiB chunks so the
+/// file is never fully resident in memory — the key to dropping a large *video* without a
+/// half-gigabyte spike. Returns the number of bytes read.
+///
+/// base64 must be emitted in whole 3-byte groups (only the final group is padded), but a
+/// `read` can return any number of bytes, so a 0–2 byte `carry` holds the bytes that don't
+/// yet complete a group and rolls them into the next read; the EOF flush pads whatever
+/// remains. Every encode call but the EOF flush is therefore a multiple of three bytes.
+///
+/// The 48 KiB stack buffer is already large, so we read the `File` directly rather than
+/// wrapping it in a `BufReader` (which would only add a redundant intermediate copy here).
+fn append_file_base64(out: &mut String, path: &std::path::Path) -> std::io::Result<u64> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = [0u8; 48 * 1024]; // 49152 = an exact number of 3-byte groups
+    let mut carry = [0u8; 3];
+    let mut carry_len = 0usize;
+    let mut total: u64 = 0;
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        let data = &buf[..n];
+        let mut i = 0;
+        // 1) Top up a carried partial group from the front of this read, then flush it.
+        while carry_len > 0 && carry_len < 3 && i < n {
+            carry[carry_len] = data[i];
+            carry_len += 1;
+            i += 1;
+        }
+        if carry_len == 3 {
+            base64_encode_into(out, &carry); // a full group → no padding
+            carry_len = 0;
+        }
+        // 2) Bulk-encode the complete 3-byte groups remaining in this read.
+        let remaining = n - i;
+        let groups = remaining - (remaining % 3);
+        if groups > 0 {
+            base64_encode_into(out, &data[i..i + groups]);
+        }
+        // 3) Stash the trailing 0–2 bytes as the new carry.
+        for &b in &data[i + groups..n] {
+            carry[carry_len] = b;
+            carry_len += 1;
+        }
+    }
+    // EOF: encode whatever is left in the carry, padding the final partial group.
+    base64_encode_into(out, &carry[..carry_len]);
+    Ok(total)
 }
 
 /// Track the last-focused account window in `ActiveAccount`. Registered once per
@@ -492,7 +582,9 @@ pub fn open_settings_window(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64_encode, mime_for, toggle_decision, ToggleAct};
+    use super::{
+        append_file_base64, base64_encode, build_drop_payload, mime_for, toggle_decision, ToggleAct,
+    };
 
     #[test]
     fn base64_matches_rfc4648_vectors() {
@@ -510,6 +602,73 @@ mod tests {
     fn base64_handles_high_bytes() {
         assert_eq!(base64_encode(&[0xff, 0xff, 0xff]), "////");
         assert_eq!(base64_encode(&[0x00]), "AA==");
+    }
+
+    // Write `bytes` to a unique temp file and return its path. Caller removes it.
+    fn write_temp(tag: &str, bytes: &[u8]) -> std::path::PathBuf {
+        use std::io::Write;
+        let p = std::env::temp_dir().join(format!(
+            "whatrust_test_{}_{}_{tag}",
+            std::process::id(),
+            bytes.len()
+        ));
+        std::fs::File::create(&p).unwrap().write_all(bytes).unwrap();
+        p
+    }
+
+    #[test]
+    fn streaming_base64_matches_oneshot_across_chunk_boundary() {
+        // append_file_base64 reads in 48 KiB chunks and carries 0..2 bytes between reads.
+        // Exercise a size just past one chunk for each length-mod-3 case so the carry/padding
+        // path is covered, and confirm it byte-for-byte matches the one-shot encoder.
+        for extra in [0usize, 1, 2] {
+            let len = 48 * 1024 + 3 + extra;
+            let data: Vec<u8> = (0..len).map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8).collect();
+            let path = write_temp(&format!("stream{extra}.bin"), &data);
+            let mut streamed = String::from("prefix:"); // also proves it APPENDS, not overwrites
+            let n = append_file_base64(&mut streamed, &path).unwrap();
+            let _ = std::fs::remove_file(&path);
+            assert_eq!(n, len as u64);
+            assert_eq!(streamed, format!("prefix:{}", base64_encode(&data)), "mismatch at extra={extra}");
+        }
+    }
+
+    #[test]
+    fn empty_file_streams_to_empty_base64() {
+        let path = write_temp("empty.bin", b"");
+        let mut s = String::new();
+        let n = append_file_base64(&mut s, &path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(n, 0);
+        assert_eq!(s, "");
+    }
+
+    #[test]
+    fn build_drop_payload_roundtrips_name_type_b64() {
+        // A small image + a video spanning the read-chunk boundary: the JSON must parse, and
+        // each entry's name/type/b64 must round-trip (b64 == one-shot encoding of the bytes).
+        let img_bytes: Vec<u8> = vec![0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4, 5];
+        let vid_bytes: Vec<u8> = (0..(48 * 1024 + 5)).map(|i| (i % 251) as u8).collect();
+        let img = write_temp("shot.png", &img_bytes);
+        let vid = write_temp("clip.mp4", &vid_bytes);
+        let json = build_drop_payload(&[img.clone(), vid.clone()]).unwrap();
+        let _ = std::fs::remove_file(&img);
+        let _ = std::fs::remove_file(&vid);
+
+        let v: serde_json::Value = serde_json::from_str(&json).expect("payload must be valid JSON");
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "image/png");
+        assert_eq!(arr[0]["b64"], base64_encode(&img_bytes));
+        assert!(arr[0]["name"].as_str().unwrap().ends_with(".png"));
+        assert_eq!(arr[1]["type"], "video/mp4");
+        assert_eq!(arr[1]["b64"], base64_encode(&vid_bytes));
+        assert!(arr[1]["name"].as_str().unwrap().ends_with(".mp4"));
+    }
+
+    #[test]
+    fn build_drop_payload_empty_for_no_files() {
+        assert_eq!(build_drop_payload(&[]).unwrap(), "[]");
     }
 
     #[test]

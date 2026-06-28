@@ -165,27 +165,55 @@ fn build_drop_payload(paths: &[std::path::PathBuf]) -> Option<String> {
 
 /// Best-effort MIME from the file extension, so WhatsApp routes images/videos/docs to
 /// the right composer. Unknown types fall back to a generic binary type (still sends).
+///
+/// Why the image list matters: bridge.js routes anything whose MIME starts with `image/`
+/// to the Photos & Videos composer (a photo); anything else goes to the Document composer.
+/// A modern phone photo (AVIF, HEIF/HEIC) that fell through to `application/octet-stream`
+/// was therefore attached as a *file* instead of a *photo* — covering those extensions
+/// fixes the routing. We deliberately do NOT route niche raster formats (TIFF, ICO, APNG)
+/// as images: WhatsApp's photo composer may reject them, which would be worse than the
+/// current behaviour of sending them as a document — so they stay documents. Non-native
+/// video containers also still go as a document (only mp4/3gpp/quicktime are accepted by
+/// the media input), but get a correct label rather than a generic one.
 fn mime_for(name: &str) -> &'static str {
     let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
+        // Images (image/* -> routed to the Photos & Videos composer by bridge.js). Limited to
+        // formats WhatsApp's photo composer accepts, so nothing regresses to "not supported".
         "png" => "image/png",
         "jpg" | "jpeg" | "jfif" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
+        "avif" => "image/avif",
         "bmp" => "image/bmp",
         "svg" => "image/svg+xml",
         "heic" => "image/heic",
+        "heif" => "image/heif",
+        // Video. Only mp4/3gpp/quicktime are accepted by WhatsApp's media input (bridge.js
+        // NATIVE_VIDEO); the rest still send, as a document, but with a correct label.
         "mp4" | "m4v" => "video/mp4",
         "mov" => "video/quicktime",
         "webm" => "video/webm",
         "mkv" => "video/x-matroska",
         "3gp" => "video/3gpp",
+        "3g2" => "video/3gpp2",
         "avi" => "video/x-msvideo",
+        "mpeg" | "mpg" => "video/mpeg",
+        "mts" | "m2ts" => "video/mp2t",
+        "ogv" => "video/ogg",
+        "flv" => "video/x-flv",
+        // Audio (sent as a document; correct labels help WhatsApp render an audio preview).
         "mp3" => "audio/mpeg",
         "ogg" | "oga" => "audio/ogg",
         "opus" => "audio/opus",
         "wav" => "audio/wav",
         "m4a" => "audio/mp4",
+        "flac" => "audio/flac",
+        "aac" => "audio/aac",
+        "weba" => "audio/webm",
+        "amr" => "audio/amr",
+        "mid" | "midi" => "audio/midi",
+        // Documents / archives / text.
         "pdf" => "application/pdf",
         "doc" => "application/msword",
         "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -193,9 +221,22 @@ fn mime_for(name: &str) -> &'static str {
         "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "ppt" => "application/vnd.ms-powerpoint",
         "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "rtf" => "application/rtf",
+        "odt" => "application/vnd.oasis.opendocument.text",
+        "ods" => "application/vnd.oasis.opendocument.spreadsheet",
+        "odp" => "application/vnd.oasis.opendocument.presentation",
+        "epub" => "application/epub+zip",
         "txt" | "log" => "text/plain",
+        "md" => "text/markdown",
         "csv" => "text/csv",
+        "json" => "application/json",
+        "xml" => "application/xml",
         "zip" => "application/zip",
+        "7z" => "application/x-7z-compressed",
+        "rar" => "application/vnd.rar",
+        "tar" => "application/x-tar",
+        "gz" => "application/gzip",
+        "apk" => "application/vnd.android.package-archive",
         _ => "application/octet-stream",
     }
 }
@@ -519,6 +560,37 @@ mod tests {
         assert_eq!(mime_for("doc.pdf"), "application/pdf");
         assert_eq!(mime_for("noext"), "application/octet-stream");
         assert_eq!(mime_for("archive.unknownext"), "application/octet-stream");
+    }
+
+    #[test]
+    fn modern_image_types_resolve_to_image_so_they_route_as_photos() {
+        // The routing fix: bridge.js sends anything `image/*` to the Photos composer. These
+        // used to fall through to octet-stream and were mis-attached as documents.
+        for n in ["pic.avif", "IMG_1.HEIF", "shot.heic"] {
+            assert!(
+                mime_for(n).starts_with("image/"),
+                "{n} should resolve to an image/* type, got {}",
+                mime_for(n)
+            );
+        }
+        // Niche raster formats are deliberately NOT routed as photos (WhatsApp's photo
+        // composer may reject them) — they stay documents, which always sends.
+        for n in ["scan.tiff", "icon.ico", "frames.apng"] {
+            assert_eq!(mime_for(n), "application/octet-stream", "{n} should stay a document");
+        }
+    }
+
+    #[test]
+    fn new_av_and_doc_types_have_specific_labels() {
+        assert_eq!(mime_for("song.flac"), "audio/flac");
+        assert_eq!(mime_for("clip.aac"), "audio/aac");
+        assert_eq!(mime_for("movie.mpeg"), "video/mpeg");
+        assert_eq!(mime_for("notes.md"), "text/markdown");
+        assert_eq!(mime_for("data.json"), "application/json");
+        assert_eq!(mime_for("Archive.7Z"), "application/x-7z-compressed");
+        assert_eq!(mime_for("book.epub"), "application/epub+zip");
+        // Unknown extensions still fall back so the file always sends.
+        assert_eq!(mime_for("mystery.qwerty"), "application/octet-stream");
     }
 
     #[test]

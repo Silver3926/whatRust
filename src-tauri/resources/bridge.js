@@ -24,13 +24,31 @@
           ],
           mobile: false,
           platform: "Linux",
+          // Real Chrome returns the requested hints (and these fields are what WhatsApp's
+          // capability/calling check reads). The previous shim omitted bitness,
+          // fullVersionList and wow64 and left platformVersion empty, which a strict check
+          // can treat as "not Chrome". Return the full, internally-consistent set; returning
+          // hints that weren't asked for is harmless.
           getHighEntropyValues: function () {
             return Promise.resolve({
-              platform: "Linux",
-              platformVersion: "",
               architecture: "x86",
+              bitness: "64",
+              brands: [
+                { brand: "Chromium", version: "131" },
+                { brand: "Google Chrome", version: "131" },
+                { brand: "Not_A Brand", version: "24" },
+              ],
+              fullVersionList: [
+                { brand: "Chromium", version: "131.0.0.0" },
+                { brand: "Google Chrome", version: "131.0.0.0" },
+                { brand: "Not_A Brand", version: "24.0.0.0" },
+              ],
+              mobile: false,
               model: "",
+              platform: "Linux",
+              platformVersion: "6.0.0",
               uaFullVersion: "131.0.0.0",
+              wow64: false,
             });
           },
         },

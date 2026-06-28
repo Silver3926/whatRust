@@ -10,6 +10,28 @@
     return Promise.resolve();
   }
 
+  // Native OS toast with short-window de-duplication. WhatsApp can raise the same alert
+  // more than once in a burst (a React re-render, or one message surfacing through two
+  // notification code paths), and unlike a browser (which collapses repeats by tag) a
+  // native toast stacks every call as a separate visible popup. Suppress an identical
+  // title+body seen within DEDUP_MS; genuinely different messages are never affected.
+  // Returns true if forwarded, false if suppressed as a duplicate.
+  var DEDUP_MS = 3500;
+  var recentNotif = Object.create(null);
+  function nativeNotify(title, body) {
+    title = String(title || "WhatsApp");
+    body = String(body || "");
+    var now = Date.now();
+    for (var k in recentNotif) {
+      if (now - recentNotif[k] > DEDUP_MS) delete recentNotif[k]; // prune stale keys
+    }
+    var key = title + " " + body;
+    if (recentNotif[key] && now - recentNotif[key] <= DEDUP_MS) return false;
+    recentNotif[key] = now;
+    invoke("notify", { title: title, body: body });
+    return true;
+  }
+
   // 1) Client Hints shim — navigator.userAgentData is undefined in WebKitGTK,
   //    which WhatsApp's capability check can trip over.
   try {
@@ -65,10 +87,7 @@
       this.onclose = null;
       this.onerror = null;
       this.onshow = null;
-      invoke("notify", {
-        title: String(title || "WhatsApp"),
-        body: String(options.body || ""),
-      });
+      nativeNotify(title, options.body);
     }
     ShimNotification.prototype.close = function () {
       if (typeof this.onclose === "function") this.onclose();

@@ -133,10 +133,9 @@
     if (SWR && SWR.prototype && typeof SWR.prototype.showNotification === "function") {
       SWR.prototype.showNotification = function (title, options) {
         options = options || {};
-        invoke("notify", {
-          title: String(title || "WhatsApp"),
-          body: String(options.body || ""),
-        });
+        // Route through nativeNotify so the service-worker path shares the same de-dup
+        // window as window.Notification (an alert that fires on both paths shows once).
+        nativeNotify(title, options.body);
         // Real API resolves Promise<undefined>; match it so callers awaiting it don't break.
         return Promise.resolve();
       };

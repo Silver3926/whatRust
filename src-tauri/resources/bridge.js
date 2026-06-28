@@ -38,6 +38,23 @@
     }
   } catch (e) {}
 
+  // 1b) Chrome environment marker — enables voice/video CALLING. WhatsApp Web gates
+  //     calling behind a Chrome/Edge eligibility check that, beyond the UA and
+  //     userAgentData (both already spoofed above), probes for `window.chrome`. WebKitGTK
+  //     ships WebRTC (so calls CAN work once eligible) but exposes no `window.chrome`, so
+  //     the call buttons stay disabled. Add a minimal, idempotent stand-in matching what a
+  //     real Chrome minimally exposes; never clobber a genuine `window.chrome`.
+  try {
+    if (!window.chrome) {
+      Object.defineProperty(window, "chrome", {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: { app: { isInstalled: false }, runtime: {} },
+      });
+    }
+  } catch (e) {}
+
   // 2) Notification override — forward to a native OS notification via Rust.
   try {
     function ShimNotification(title, options) {

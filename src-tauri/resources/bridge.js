@@ -66,6 +66,34 @@
     window.Notification = ShimNotification;
   } catch (e) {}
 
+  // 2b) Service-worker notification path. Modern WhatsApp Web also raises notifications
+  //     via ServiceWorkerRegistration.showNotification (e.g. when the tab is backgrounded),
+  //     which the window.Notification shim above does NOT intercept — so those toasts never
+  //     reached the OS. Override the page-side prototype method to forward through the same
+  //     native `notify` command, and report an empty list from getNotifications (we render a
+  //     native toast, so there is no in-page Notification object to hand back). We can only
+  //     reach the page's prototype here; notifications fired from inside the service worker's
+  //     own context are out of scope for a page-injected script.
+  try {
+    var SWR = window.ServiceWorkerRegistration;
+    if (SWR && SWR.prototype && typeof SWR.prototype.showNotification === "function") {
+      SWR.prototype.showNotification = function (title, options) {
+        options = options || {};
+        invoke("notify", {
+          title: String(title || "WhatsApp"),
+          body: String(options.body || ""),
+        });
+        // Real API resolves Promise<undefined>; match it so callers awaiting it don't break.
+        return Promise.resolve();
+      };
+      if (typeof SWR.prototype.getNotifications === "function") {
+        SWR.prototype.getNotifications = function () {
+          return Promise.resolve([]);
+        };
+      }
+    }
+  } catch (e) {}
+
   // 3) Unread count — forward the raw <title> string on change; Rust parses it.
   var lastTitle = "";
   function report() {

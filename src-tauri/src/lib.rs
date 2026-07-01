@@ -1,15 +1,15 @@
 mod accounts;
 mod applock;
+mod aumid;
 mod biometric;
+mod commands;
+mod dlog;
 mod lock;
-mod window;
-mod unread;
+mod notify;
 mod settings;
 mod tray;
-mod commands;
-mod notify;
-mod aumid;
-mod dlog;
+mod unread;
+mod window;
 
 use tauri::Manager;
 
@@ -177,7 +177,11 @@ pub fn run() {
             // macOS: clicking the dock icon after hide-to-tray re-shows the window
             // (otherwise the app is only reachable via the menu-bar tray icon).
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = &_event {
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } = &_event
+            {
                 if !*has_visible_windows {
                     window::show_main(_app_handle);
                 }

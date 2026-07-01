@@ -33,7 +33,7 @@ fn check_polkit_unlock() -> Result<bool, Box<dyn std::error::Error>> {
         ACTION_ID,
         &details,
         CheckAuthorizationFlags::AllowUserInteraction.into(), // -> BitFlags<CheckAuthorizationFlags>
-        "", // cancellation_id
+        "",                                                   // cancellation_id
     )?;
     Ok(result.is_authorized)
 }

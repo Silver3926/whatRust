@@ -109,7 +109,11 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let s = Settings { autostart: true, hotkey: "Ctrl+Alt+W".into(), ..Default::default() };
+        let s = Settings {
+            autostart: true,
+            hotkey: "Ctrl+Alt+W".into(),
+            ..Default::default()
+        };
         let json = serde_json::to_string(&s).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);

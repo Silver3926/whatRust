@@ -268,7 +268,11 @@ pub fn rename_account(
 }
 
 #[tauri::command]
-pub fn open_account(window: tauri::Window, app: tauri::AppHandle, id: String) -> Result<(), String> {
+pub fn open_account(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<(), String> {
     if is_remote(&window) {
         return Err("forbidden".into());
     }
@@ -315,7 +319,10 @@ pub fn get_lock_status(window: tauri::Window, app: tauri::AppHandle) -> Result<L
         return Err("forbidden".into());
     }
     let c = applock::load(&app);
-    let available = matches!(crate::biometric::availability(), crate::biometric::Availability::Available);
+    let available = matches!(
+        crate::biometric::availability(),
+        crate::biometric::Availability::Available
+    );
     Ok(LockStatus {
         enabled: c.is_active(),
         biometric_available: available,
@@ -441,7 +448,10 @@ pub fn set_biometric_enabled(
         if !c.is_active() {
             return Err("set an app-lock password first".into());
         }
-        if !matches!(crate::biometric::availability(), crate::biometric::Availability::Available) {
+        if !matches!(
+            crate::biometric::availability(),
+            crate::biometric::Availability::Available
+        ) {
             return Err("biometric authentication is not available on this device".into());
         }
         if !crate::biometric::authenticate(&app, "Enable biometric unlock for whatRust")? {

@@ -6,9 +6,8 @@ use std::sync::mpsc;
 
 pub fn availability() -> Availability {
     let ctx = unsafe { LAContext::new() };
-    let can = unsafe {
-        ctx.canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthenticationWithBiometrics)
-    };
+    let can =
+        unsafe { ctx.canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthenticationWithBiometrics) };
     match can {
         Ok(()) => Availability::Available,
         Err(_) => Availability::NotConfigured,
@@ -18,13 +17,19 @@ pub fn availability() -> Availability {
 pub fn authenticate(_app: &tauri::AppHandle, reason: &str) -> Result<bool, String> {
     // Fresh context per call (LAContext caches a prior success).
     let ctx = unsafe { LAContext::new() };
-    let reason = if reason.is_empty() { "Unlock whatRust" } else { reason };
+    let reason = if reason.is_empty() {
+        "Unlock whatRust"
+    } else {
+        reason
+    };
     let ns_reason = NSString::from_str(reason);
 
     let (tx, rx) = mpsc::channel::<bool>();
-    let block = RcBlock::new(move |success: objc2::runtime::Bool, _err: *mut objc2_foundation::NSError| {
-        let _ = tx.send(success.as_bool());
-    });
+    let block = RcBlock::new(
+        move |success: objc2::runtime::Bool, _err: *mut objc2_foundation::NSError| {
+            let _ = tx.send(success.as_bool());
+        },
+    );
 
     unsafe {
         // DeviceOwnerAuthentication = Touch ID OR the login password as fallback.

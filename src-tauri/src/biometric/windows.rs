@@ -3,10 +3,10 @@ use tauri::Manager;
 use windows::core::{factory, HSTRING};
 // In windows-rs 0.61 the async operation types live in the windows-future crate,
 // NOT windows::Foundation. `IAsyncOperation::get()` (blocking) is from there too.
-use windows_future::IAsyncOperation;
 use windows::Security::Credentials::UI::{
     UserConsentVerificationResult, UserConsentVerifier, UserConsentVerifierAvailability,
 };
+use windows_future::IAsyncOperation;
 // IUserConsentVerifierInterop lives in Win32::System::WinRT, NOT Security::Credentials::UI:
 use windows::Win32::System::WinRT::IUserConsentVerifierInterop;
 
@@ -32,7 +32,8 @@ pub fn authenticate(app: &tauri::AppHandle, reason: &str) -> Result<bool, String
         factory::<UserConsentVerifier, IUserConsentVerifierInterop>().map_err(|e| e.to_string())?;
     let msg = HSTRING::from(reason);
     let op: IAsyncOperation<UserConsentVerificationResult> =
-        unsafe { interop.RequestVerificationForWindowAsync(hwnd, &msg) }.map_err(|e| e.to_string())?;
+        unsafe { interop.RequestVerificationForWindowAsync(hwnd, &msg) }
+            .map_err(|e| e.to_string())?;
     match op.get() {
         Ok(UserConsentVerificationResult::Verified) => Ok(true),
         Ok(_) => Ok(false),

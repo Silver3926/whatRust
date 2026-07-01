@@ -165,7 +165,11 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let c = AppLockConfig { enabled: true, idle_secs: 300, ..Default::default() };
+        let c = AppLockConfig {
+            enabled: true,
+            idle_secs: 300,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&c).unwrap();
         let back: AppLockConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(c, back);

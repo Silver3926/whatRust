@@ -57,7 +57,12 @@ impl Default for AccountsFile {
 pub fn add(f: &mut AccountsFile, name: &str) -> Account {
     let id = format!("acct-{}", f.next_seq);
     f.next_seq += 1;
-    let order = f.accounts.iter().map(|a| a.order).max().map_or(0, |m| m + 1);
+    let order = f
+        .accounts
+        .iter()
+        .map(|a| a.order)
+        .max()
+        .map_or(0, |m| m + 1);
     let acct = Account {
         id,
         name: name.to_string(),

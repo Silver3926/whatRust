@@ -2,7 +2,9 @@
 /// Returns 0 when there is no leading "(n)" group.
 pub fn parse_unread(title: &str) -> u32 {
     let t = title.trim_start();
-    let Some(rest) = t.strip_prefix('(') else { return 0 };
+    let Some(rest) = t.strip_prefix('(') else {
+        return 0;
+    };
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().unwrap_or(0)
 }

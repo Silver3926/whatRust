@@ -52,7 +52,7 @@ The official WhatsApp Desktop app is built on Electron, which packs an entire Ch
 - **System tray** icon with **close-to-tray** and an **unread message badge**
 - **Native OS notifications** for new messages
 - **Persistent login** — scan the QR code once, stay signed in across restarts
-- **Voice messages, voice calls, and video calls** — microphone and camera support
+- **Voice messages** everywhere, plus **voice & video calls** where the system webview ships WebRTC (Windows and macOS; most Linux distros build WebKitGTK without WebRTC, so calling isn't available on Linux)
 - **Drag and drop files and images** — drop a photo, video, or document straight onto a chat to attach it
 - **Launch at startup** (auto-start), optional
 - **Global keyboard shortcut** to show/hide the window (default `Ctrl/Cmd+Shift+W`; record your own by pressing the keys in Settings). On **Wayland**, bind `whatrust --toggle` to a system shortcut instead — see the FAQ.
@@ -104,7 +104,8 @@ OS supports it — before showing your chats. Enable it under **Settings → Sec
 | System tray + close to tray | ✅ Yes | ⚠️ Partial |
 | Unread message badge | ✅ Yes | ✅ Yes |
 | Native notifications | ✅ Yes | ✅ Yes |
-| Voice messages & calls (mic/camera) | ✅ Yes | ✅ Yes |
+| Voice messages (mic/camera) | ✅ Yes | ✅ Yes |
+| Voice & video calls | ⚠️ Windows/macOS (Linux webview lacks WebRTC) | ✅ Yes |
 | Multiple accounts (isolated sessions) | ✅ Yes | ❌ No |
 | Optional app lock (password + biometric) | ✅ Yes | ❌ No |
 | Global show/hide shortcut | ✅ Yes | ❌ No |
@@ -182,7 +183,7 @@ Linux (WebKitGTK), Windows 10/11 (WebView2), and macOS 12+ (WKWebView).
 Yes — whatRust is free and open source under the MIT License. The source is on [GitHub](https://github.com/karem505/whatRust).
 
 ### Do voice messages, voice calls, and video calls work in whatRust?
-Yes. whatRust grants the webview microphone and camera access, so voice messages and calls work the same as in WhatsApp Web.
+Voice messages work on every platform — whatRust grants the webview microphone and camera access. Voice and video **calls** additionally need WebRTC inside the system webview: that's there on Windows (WebView2/Chromium) and macOS (WKWebKit), but most Linux distributions build WebKitGTK **without** WebRTC, so WhatsApp correctly reports that calling isn't supported on Linux. This is an engine limitation, not a permissions problem — if your distro ships a WebRTC-enabled WebKitGTK, calls light up automatically.
 
 ### Can I use multiple WhatsApp accounts in whatRust?
 Yes. whatRust supports **multiple WhatsApp accounts** running at the same time — each opens in its own window with a fully isolated session, so different numbers stay logged in independently. Add, rename, and remove accounts from **Settings → Accounts**. On macOS this requires macOS 14 or later; Linux and Windows have no limit.

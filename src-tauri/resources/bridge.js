@@ -40,8 +40,8 @@
         configurable: true,
         value: {
           brands: [
-            { brand: "Chromium", version: "131" },
-            { brand: "Google Chrome", version: "131" },
+            { brand: "Chromium", version: "143" },
+            { brand: "Google Chrome", version: "143" },
             { brand: "Not_A Brand", version: "24" },
           ],
           mobile: false,
@@ -56,20 +56,20 @@
               architecture: "x86",
               bitness: "64",
               brands: [
-                { brand: "Chromium", version: "131" },
-                { brand: "Google Chrome", version: "131" },
+                { brand: "Chromium", version: "143" },
+                { brand: "Google Chrome", version: "143" },
                 { brand: "Not_A Brand", version: "24" },
               ],
               fullVersionList: [
-                { brand: "Chromium", version: "131.0.0.0" },
-                { brand: "Google Chrome", version: "131.0.0.0" },
+                { brand: "Chromium", version: "143.0.0.0" },
+                { brand: "Google Chrome", version: "143.0.0.0" },
                 { brand: "Not_A Brand", version: "24.0.0.0" },
               ],
               mobile: false,
               model: "",
               platform: "Linux",
               platformVersion: "6.0.0",
-              uaFullVersion: "131.0.0.0",
+              uaFullVersion: "143.0.0.0",
               wow64: false,
             });
           },
@@ -78,12 +78,14 @@
     }
   } catch (e) {}
 
-  // 1b) Chrome environment marker — enables voice/video CALLING. WhatsApp Web gates
-  //     calling behind a Chrome/Edge eligibility check that, beyond the UA and
-  //     userAgentData (both already spoofed above), probes for `window.chrome`. WebKitGTK
-  //     ships WebRTC (so calls CAN work once eligible) but exposes no `window.chrome`, so
-  //     the call buttons stay disabled. Add a minimal, idempotent stand-in matching what a
-  //     real Chrome minimally exposes; never clobber a genuine `window.chrome`.
+  // 1b) Chrome environment marker. WhatsApp Web's eligibility checks probe for
+  //     `window.chrome` beyond the UA and userAgentData (both spoofed above). Add a
+  //     minimal, idempotent stand-in matching what a real Chrome minimally exposes;
+  //     never clobber a genuine `window.chrome` (WebView2 on Windows has a real one).
+  //     NOTE: this makes the *presentation* consistent; it cannot conjure missing
+  //     engine APIs. Linux distro WebKitGTK ships no WebRTC backend, so calling
+  //     stays unsupported there regardless (verified: RTCPeerConnection undefined
+  //     with enable-webrtc on, webkit2gtk 2.52.3).
   try {
     if (!window.chrome) {
       Object.defineProperty(window, "chrome", {

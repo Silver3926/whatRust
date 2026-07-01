@@ -2,9 +2,15 @@ use crate::accounts::{self, Account, ActiveAccount};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 /// Recent desktop Chrome UA. WhatsApp Web rejects the default WebKitGTK/Safari UA.
-/// Bump the major version occasionally.
+/// Bump the major version occasionally, and keep it in sync with the client-hints
+/// shim in `resources/bridge.js` (brands/fullVersionList/uaFullVersion).
+///
+/// NOTE (Linux): setting this alone is NOT enough — WebKitGTK's site-specific
+/// quirks override the embedder UA for web.whatsapp.com with a fake macOS Safari
+/// string. `enable_webview_media` turns quirks off so this UA actually reaches
+/// the site.
 pub const CHROME_UA: &str =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
 
 const BRIDGE_JS: &str = include_str!("../resources/bridge.js");
 const APP_ICON: &[u8] = include_bytes!("../icons/128x128.png");
@@ -45,6 +51,54 @@ pub fn open_account_window(
         // Belt-and-braces: cancel any `file://` navigation so a stray drop can never
         // navigate the window away and tear down the live WhatsApp session.
         .on_navigation(|url| url.scheme() != "file")
+        // Downloads: with NO handler registered, wry never wires up the platform's
+        // download machinery at all — on Linux nobody answers WebKit's
+        // `decide-destination` and the engine cancels every download, so WhatsApp's
+        // "Download" button (videos, images, documents) silently did nothing.
+        // Accept every download into the user's Downloads folder (wry pre-fills a
+        // de-duplicated absolute path on Linux/Windows; the fallback covers a
+        // platform handing us an empty/relative destination) and toast on finish.
+        .on_download(|webview, event| {
+            match event {
+                tauri::webview::DownloadEvent::Requested { url, destination } => {
+                    ensure_download_destination(
+                        destination,
+                        webview.app_handle().path().download_dir().ok(),
+                    );
+                    // Log routing only — never the file name (matches dlog's no-PII rule).
+                    crate::dlog::log(&format!(
+                        "download: requested scheme={} dest_abs={}",
+                        url.scheme(),
+                        destination.is_absolute()
+                    ));
+                }
+                tauri::webview::DownloadEvent::Finished { path, success, .. } => {
+                    crate::dlog::log(&format!(
+                        "download: finished success={success} path_known={}",
+                        path.is_some()
+                    ));
+                    let app = webview.app_handle();
+                    if success {
+                        let body = match path.as_ref().and_then(|p| p.file_name()) {
+                            Some(n) => {
+                                format!("{} — saved to your Downloads folder.", n.to_string_lossy())
+                            }
+                            // macOS never reports the final path; the folder is still right.
+                            None => "Saved to your Downloads folder.".to_string(),
+                        };
+                        crate::notify::show(app, "Download complete", &body);
+                    } else {
+                        crate::notify::show(
+                            app,
+                            "Download failed",
+                            "The file could not be downloaded. Please try again.",
+                        );
+                    }
+                }
+                _ => {}
+            }
+            true
+        })
         .visible(!start_hidden);
 
     let builder = apply_isolation(builder, account, app);
@@ -359,6 +413,26 @@ fn append_file_base64(out: &mut String, path: &std::path::Path) -> std::io::Resu
     Ok(total)
 }
 
+/// Make sure a platform-suggested download `destination` is usable: keep an
+/// absolute path with a file name as-is; otherwise rebuild it as
+/// `<download_dir>/<file name>` (file name defaulting to "download", directory
+/// defaulting to the temp dir if the platform can't name a Downloads folder).
+fn ensure_download_destination(
+    destination: &mut std::path::PathBuf,
+    download_dir: Option<std::path::PathBuf>,
+) {
+    if destination.is_absolute() && destination.file_name().is_some() {
+        return;
+    }
+    let name = destination
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| "download".into());
+    let mut dir = download_dir.unwrap_or_else(std::env::temp_dir);
+    dir.push(name);
+    *destination = dir;
+}
+
 /// Track the last-focused account window in `ActiveAccount`. Registered once per
 /// window inside `open_account_window`, so startup *and* dynamically-added windows
 /// get it exactly once.
@@ -406,9 +480,7 @@ fn apply_isolation<'a>(
         let _ = app;
         // Non-default accounts carry a persisted, non-nil v4 UUID. Fall back to a
         // freshly generated non-nil UUID rather than risk the nil-UUID exception.
-        let uuid = account
-            .store_uuid
-            .unwrap_or_else(accounts::gen_store_uuid);
+        let uuid = account.store_uuid.unwrap_or_else(accounts::gen_store_uuid);
         builder.data_store_identifier(uuid)
     }
     #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
@@ -444,10 +516,19 @@ pub fn ensure_isolation_supported() -> Result<(), String> {
     }
 }
 
-/// Grant microphone/camera + WebRTC to WhatsApp Web. The system webview denies
-/// getUserMedia by default, which blocks voice messages and calls (the
-/// "Allow microphone" prompt). We enable the media settings and auto-approve
-/// the webview's permission requests for the WhatsApp window.
+/// Grant microphone/camera + media settings to WhatsApp Web, and make sure the
+/// site actually sees our Chrome UA. The system webview denies getUserMedia by
+/// default, which blocks voice messages (the "Allow microphone" prompt). We
+/// enable the media settings and auto-approve the webview's permission requests
+/// for the WhatsApp window.
+///
+/// Reality check (verified against webkit2gtk 2.52.3 on this distro): the
+/// library is built WITHOUT a WebRTC backend — `RTCPeerConnection` stays
+/// undefined even with `enable-webrtc` on (the setting is kept as a harmless
+/// forward-compat no-op). Voice/video CALLS therefore cannot work in the Linux
+/// system webview no matter what we spoof; WhatsApp's "your browser doesn't
+/// support calling" is, on Linux, literally true. Calls can work on Windows
+/// (WebView2 is Chromium and ships WebRTC).
 fn enable_webview_media(win: &WebviewWindow) {
     #[cfg(target_os = "linux")]
     {
@@ -460,11 +541,31 @@ fn enable_webview_media(win: &WebviewWindow) {
                 settings.set_property("enable-mediasource", true);
                 settings.set_property("enable-webrtc", true);
                 settings.set_property("enable-encrypted-media", true);
+                // CRITICAL: WebKitGTK hardcodes per-site UA quirks, and
+                // web.whatsapp.com is on the list — with quirks enabled (the
+                // default) the engine REPLACES our Chrome UA with a fake macOS
+                // Safari string ("... Version/60.5 Safari/605.1.15"), which
+                // WhatsApp reads as an ancient Safari and answers by disabling
+                // video sending and calling ("please update your browser").
+                // Turning quirks off lets CHROME_UA through unmodified.
+                settings.set_property("enable-site-specific-quirks", false);
+                // Opt-in inspector for live diagnosis: run `WHATRUST_DEVTOOLS=1
+                // whatrust` and right-click > Inspect Element.
+                if std::env::var_os("WHATRUST_DEVTOOLS").is_some() {
+                    settings.set_property("enable-developer-extras", true);
+                }
             }
             wv.connect_permission_request(|_wv, req| {
                 req.allow();
                 true
             });
+            // The initial navigation was issued before this callback ran, i.e.
+            // with the quirked UA still active. Reload once so the session is
+            // consistently Chrome from the very first request WhatsApp sees.
+            wv.reload();
+            crate::dlog::log(
+                "webview: media settings applied, site-specific quirks OFF, reloaded with Chrome UA",
+            );
         });
     }
     #[cfg(target_os = "windows")]
@@ -626,8 +727,60 @@ pub fn open_settings_window(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_file_base64, base64_encode, build_drop_payload, mime_for, toggle_decision, ToggleAct,
+        append_file_base64, base64_encode, build_drop_payload, ensure_download_destination,
+        mime_for, toggle_decision, ToggleAct, CHROME_UA,
     };
+
+    #[test]
+    fn chrome_ua_and_bridge_client_hints_agree_on_the_version() {
+        // The UA header (Rust) and the client-hints shim (bridge.js) must present the
+        // same Chrome major version, or WhatsApp sees an inconsistent browser.
+        let major = CHROME_UA
+            .split("Chrome/")
+            .nth(1)
+            .and_then(|s| s.split('.').next())
+            .expect("CHROME_UA carries a Chrome/<major> token");
+        let bridge = include_str!("../resources/bridge.js");
+        assert!(
+            bridge.contains(&format!("version: \"{major}\"")),
+            "bridge.js client hints must advertise Chrome {major}"
+        );
+        assert!(
+            bridge.contains(&format!("uaFullVersion: \"{major}.0.0.0\"")),
+            "bridge.js uaFullVersion must advertise Chrome {major}"
+        );
+    }
+
+    #[test]
+    fn absolute_download_destination_is_kept() {
+        let mut d = std::path::PathBuf::from("/home/user/Downloads/video.mp4");
+        ensure_download_destination(&mut d, Some(std::path::PathBuf::from("/elsewhere")));
+        assert_eq!(
+            d,
+            std::path::PathBuf::from("/home/user/Downloads/video.mp4")
+        );
+    }
+
+    #[test]
+    fn empty_download_destination_falls_back_to_download_dir() {
+        let mut d = std::path::PathBuf::new();
+        ensure_download_destination(&mut d, Some(std::path::PathBuf::from("/dl")));
+        assert_eq!(d, std::path::PathBuf::from("/dl/download"));
+    }
+
+    #[test]
+    fn relative_download_destination_moves_into_download_dir() {
+        let mut d = std::path::PathBuf::from("clip.mp4");
+        ensure_download_destination(&mut d, Some(std::path::PathBuf::from("/dl")));
+        assert_eq!(d, std::path::PathBuf::from("/dl/clip.mp4"));
+    }
+
+    #[test]
+    fn missing_download_dir_falls_back_to_temp() {
+        let mut d = std::path::PathBuf::from("clip.mp4");
+        ensure_download_destination(&mut d, None);
+        assert_eq!(d, std::env::temp_dir().join("clip.mp4"));
+    }
 
     #[test]
     fn base64_matches_rfc4648_vectors() {
@@ -666,13 +819,19 @@ mod tests {
         // path is covered, and confirm it byte-for-byte matches the one-shot encoder.
         for extra in [0usize, 1, 2] {
             let len = 48 * 1024 + 3 + extra;
-            let data: Vec<u8> = (0..len).map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8).collect();
+            let data: Vec<u8> = (0..len)
+                .map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8)
+                .collect();
             let path = write_temp(&format!("stream{extra}.bin"), &data);
             let mut streamed = String::from("prefix:"); // also proves it APPENDS, not overwrites
             let n = append_file_base64(&mut streamed, &path).unwrap();
             let _ = std::fs::remove_file(&path);
             assert_eq!(n, len as u64);
-            assert_eq!(streamed, format!("prefix:{}", base64_encode(&data)), "mismatch at extra={extra}");
+            assert_eq!(
+                streamed,
+                format!("prefix:{}", base64_encode(&data)),
+                "mismatch at extra={extra}"
+            );
         }
     }
 
@@ -737,7 +896,11 @@ mod tests {
         // Niche raster formats are deliberately NOT routed as photos (WhatsApp's photo
         // composer may reject them) — they stay documents, which always sends.
         for n in ["scan.tiff", "icon.ico", "frames.apng"] {
-            assert_eq!(mime_for(n), "application/octet-stream", "{n} should stay a document");
+            assert_eq!(
+                mime_for(n),
+                "application/octet-stream",
+                "{n} should stay a document"
+            );
         }
     }
 

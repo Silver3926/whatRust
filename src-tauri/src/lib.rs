@@ -15,6 +15,21 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Linux: expose SharedArrayBuffer in the webview. WhatsApp Web's Chrome
+    // codepath (which we present ourselves as — see window::CHROME_UA) runs its
+    // wasm media/crypto workers on SharedArrayBuffer, and desktop Chrome exposes
+    // SAB unconditionally. Distro WebKitGTK ships it OFF even under full
+    // cross-origin isolation (verified: crossOriginIsolated=true, SAB still
+    // undefined), so video upload/processing hangs on an endless spinner. JSC
+    // reads this option from the environment in every web process it spawns;
+    // it must be set before the first webview exists. Verified to give real
+    // shared-memory semantics (wasm shared Memory + Atomics across workers).
+    // Overridable: an already-set value (e.g. =0) is respected.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("JSC_useSharedArrayBuffer").is_none() {
+        std::env::set_var("JSC_useSharedArrayBuffer", "1");
+    }
+
     let mut builder = tauri::Builder::default();
 
     // single-instance MUST be registered first.

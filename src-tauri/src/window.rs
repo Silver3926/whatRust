@@ -1009,12 +1009,15 @@ mod tests {
 
     #[test]
     fn absolute_download_destination_is_kept() {
-        let mut d = std::path::PathBuf::from("/home/user/Downloads/video.mp4");
+        // A Unix "/..." path is NOT absolute on Windows (no drive letter), so give
+        // each platform a path that is genuinely absolute there.
+        #[cfg(windows)]
+        let abs = "C:\\Users\\user\\Downloads\\video.mp4";
+        #[cfg(not(windows))]
+        let abs = "/home/user/Downloads/video.mp4";
+        let mut d = std::path::PathBuf::from(abs);
         ensure_download_destination(&mut d, Some(std::path::PathBuf::from("/elsewhere")));
-        assert_eq!(
-            d,
-            std::path::PathBuf::from("/home/user/Downloads/video.mp4")
-        );
+        assert_eq!(d, std::path::PathBuf::from(abs));
     }
 
     #[test]

@@ -32,9 +32,59 @@
     return true;
   }
 
-  // 1) Client Hints shim — navigator.userAgentData is undefined in WebKitGTK,
-  //    which WhatsApp's capability check can trip over.
+  // 0) Page-error tap -> diagnostic log. WhatsApp failures (e.g. a media worker
+  //    dying) are invisible at the process level; forward the page's error
+  //    surface to dlog so a hang can be diagnosed from the log alone. Capped and
+  //    truncated; technical error text only.
   try {
+    var errCount = 0;
+    var elog = function (m) {
+      if (errCount >= 40) return;
+      errCount++;
+      try { invoke("dlog", { msg: ("pageerr: " + m).slice(0, 300) }); } catch (e) {}
+    };
+    window.addEventListener("error", function (e) {
+      if (e && e.message) elog("onerror: " + e.message + " @" + (e.filename || "") + ":" + (e.lineno || 0));
+    }, true);
+    window.addEventListener("unhandledrejection", function (e) {
+      var r = e && e.reason;
+      elog("unhandledrejection: " + ((r && (r.stack || r.message)) || r));
+    });
+    // NOTE: we deliberately do NOT hook console.error — WhatsApp routes routine,
+    // message-adjacent logs through it, which would risk leaking chat content into
+    // the diagnostic log (dlog's no-PII rule). window.onerror / unhandledrejection /
+    // worker-onerror capture genuine faults without that exposure.
+    // Unhandled errors inside dedicated workers (WhatsApp's wasm media pipeline
+    // runs there) never reach window.onerror; wrap the constructor to listen.
+    var NativeWorker = window.Worker;
+    if (typeof NativeWorker === "function") {
+      var WrappedWorker = function Worker(url, opts) {
+        var w = opts !== undefined ? new NativeWorker(url, opts) : new NativeWorker(url);
+        try {
+          w.addEventListener("error", function (e) {
+            elog("worker onerror: " + ((e && e.message) || "?") + " @" + ((e && e.filename) || "") + ":" + ((e && e.lineno) || 0));
+          });
+        } catch (e) {}
+        return w;
+      };
+      WrappedWorker.prototype = NativeWorker.prototype;
+      window.Worker = WrappedWorker;
+    }
+  } catch (e) {}
+
+  // 1) Client Hints shim — navigator.userAgentData is undefined in WebKit
+  //    (WebKitGTK on Linux, WKWebView on macOS), which WhatsApp's capability
+  //    check can trip over. On Windows WebView2 is Chromium: userAgentData is
+  //    real and this shim is skipped. The platform token is derived from the
+  //    UA string Rust set (per-OS CHROME_UA), so hints and UA agree instead of
+  //    hardcoding "Linux" everywhere.
+  try {
+    var uaPlatform = /Macintosh|Mac OS X/.test(navigator.userAgent || "")
+      ? "macOS"
+      : /Windows/.test(navigator.userAgent || "")
+        ? "Windows"
+        : "Linux";
+    var uaPlatformVersion = uaPlatform === "macOS" ? "13.0.0" : uaPlatform === "Windows" ? "10.0.0" : "6.0.0";
     if (!navigator.userAgentData) {
       Object.defineProperty(navigator, "userAgentData", {
         configurable: true,
@@ -45,7 +95,7 @@
             { brand: "Not_A Brand", version: "24" },
           ],
           mobile: false,
-          platform: "Linux",
+          platform: uaPlatform,
           // Real Chrome returns the requested hints (and these fields are what WhatsApp's
           // capability/calling check reads). The previous shim omitted bitness,
           // fullVersionList and wow64 and left platformVersion empty, which a strict check
@@ -67,8 +117,8 @@
               ],
               mobile: false,
               model: "",
-              platform: "Linux",
-              platformVersion: "6.0.0",
+              platform: uaPlatform,
+              platformVersion: uaPlatformVersion,
               uaFullVersion: "143.0.0.0",
               wow64: false,
             });
@@ -177,10 +227,14 @@
   }
 
   // 4) Drag-and-drop file injection.
-  //    The native webview never delivers an OS file drop into this page on Linux
-  //    (broken on Wayland; on X11 the GTK drop is accepted but never reaches the DOM),
-  //    so Rust captures the drop (window.rs `register_drop_handler`) and calls this with
-  //    the file bytes. We rebuild the File(s) and hand them to WhatsApp's own attach flow.
+  //    The native webview never delivers an OS file drop into this page on any platform
+  //    (Tauri's drop handler consumes it), so Rust captures the drop (window.rs
+  //    `register_drop_handler`) and STREAMS the file bytes here through
+  //    `__whatrustDropFeed` as begin/chunk/end/commit messages keyed by a drop id.
+  //    Chunked transport (vs the old single giant eval) keeps peak memory at one
+  //    ~5.6 MB base64 chunk per step and stays far below WebView2's cross-process
+  //    message ceiling; each chunk is standalone base64 (Rust emits multiple-of-3
+  //    byte chunks) decoded to bytes on arrival.
   //
   //    WhatsApp Web keeps a sticker-creator <input type=file> (image-only accept) ALWAYS
   //    mounted, but mounts the real "Photos & videos" input (accept includes video) and
@@ -191,18 +245,26 @@
   //    for synthetic bubbling events; it doesn't check isTrusted, and input.files is
   //    settable in WebKit). Images + native videos -> media input; everything else (zip,
   //    pdf, docs, webm/mkv/avi) -> document input. We never use the sticker input.
+  //
+  //    A MIXED drop (media + documents) routes EVERYTHING through the Document input:
+  //    one composer per drop, and the document input accepts every file — a photo sent
+  //    as a file still arrives, whereas the old "media wins" policy silently discarded
+  //    the documents. Drops are queued and injected ONE AT A TIME (a later drop waits
+  //    for the earlier composer), so two quick drops can't overwrite each other's
+  //    input.files. There is no content dedupe: distinct same-named files both attach;
+  //    replays are impossible because every drop carries a unique Rust-side id.
   try {
     var drop = {};
     drop.log = function (m) {
       try { console.log("[whatRust drop] " + m); } catch (e) {}
       try { invoke("dlog", { msg: String(m).slice(0, 280) }); } catch (e) {}
     };
-    drop.b64ToFile = function (b64, name, type) {
+    drop.b64ToBytes = function (b64) {
       var bin = atob(b64),
         n = bin.length,
         u = new Uint8Array(n);
       for (var i = 0; i < n; i++) u[i] = bin.charCodeAt(i);
-      return new File([u], name, { type: type || "application/octet-stream" });
+      return u;
     };
     drop.dataTransfer = function (files) {
       var dt = new DataTransfer();
@@ -223,11 +285,12 @@
       return null;
     };
     // The media input is the only file input whose accept lists a video type; the sticker
-    // input is image-only, so it can never match this.
+    // input is image-only, so it can never match this. isConnected guards against a
+    // stale input left over from a torn-down composer.
     drop.findMediaInput = function () {
       var ins = document.querySelectorAll('input[type="file"]');
       for (var i = 0; i < ins.length; i++) {
-        if (/video/i.test(ins[i].accept || "")) return ins[i];
+        if (ins[i].isConnected !== false && /video/i.test(ins[i].accept || "")) return ins[i];
       }
       return null;
     };
@@ -236,6 +299,7 @@
     drop.findDocInput = function () {
       var ins = document.querySelectorAll('input[type="file"]');
       for (var i = 0; i < ins.length; i++) {
+        if (ins[i].isConnected === false) continue;
         var a = (ins[i].accept || "").trim();
         if (a === "" || a === "*" || a === "*/*") return ins[i];
         if (!/image/i.test(a) && !/video/i.test(a)) return ins[i];
@@ -311,8 +375,9 @@
         });
       });
     };
-    // WhatsApp opens a media/document preview composer once a file is attached; use it as
-    // the success signal for diagnostics. Best-effort selectors across WA Web versions.
+    // WhatsApp opens a media/document preview composer once a file is attached; used both
+    // as the success signal and to hold the NEXT queued drop until the current composer
+    // is closed. Best-effort selectors across WA Web versions.
     drop.composerOpen = function () {
       return !!(
         document.querySelector('[data-testid="media-caption-input-container"]') ||
@@ -332,56 +397,126 @@
         })();
       });
     };
-    // De-dupe: a given file can't be re-injected within 4s (guards eval retries).
-    drop.seen = Object.create(null);
-    drop.dedupe = function (list) {
-      return list.filter(function (f) {
-        var k = f.name + "|" + (f.b64 || "").slice(0, 24);
-        if (drop.seen[k]) return false;
-        drop.seen[k] = 1;
-        setTimeout(function () {
-          delete drop.seen[k];
-        }, 4000);
-        return true;
+
+    // --- chunked receive state ---
+    // pending[dropId] = { files: { idx: {name,type,size,parts:[Uint8Array],got} } }
+    drop.pending = Object.create(null);
+    // Discard a stream that never commits (e.g. Rust died mid-drop) after 60s.
+    drop.touch = function (st) {
+      if (st.gc) clearTimeout(st.gc);
+      st.gc = setTimeout(function () {
+        delete drop.pending[st.id];
+        drop.log("drop #" + st.id + " expired uncommitted");
+      }, 60000);
+    };
+    drop.state = function (id) {
+      var st = drop.pending[id];
+      if (!st) {
+        st = drop.pending[id] = { id: id, files: Object.create(null) };
+      }
+      drop.touch(st);
+      return st;
+    };
+
+    // Serialized injection queue: one drop's composer at a time.
+    drop.queue = Promise.resolve();
+    drop.runQueued = function (job) {
+      drop.queue = drop.queue.then(job, job);
+    };
+
+    drop.injectBatch = function (files) {
+      var media = files.filter(function (f) { return drop.isMedia(f.type); });
+      var docs = files.filter(function (f) { return !drop.isMedia(f.type); });
+      // One composer per drop. A mixed batch goes WHOLLY through the document
+      // input (it accepts everything) so no file is ever silently discarded.
+      var kind, batch;
+      if (media.length && docs.length) {
+        kind = "document";
+        batch = files;
+        drop.log("mixed drop: routing all " + files.length + " file(s) as documents");
+      } else if (media.length) {
+        kind = "media";
+        batch = media;
+      } else {
+        kind = "document";
+        batch = docs;
+      }
+      drop.log("drop: injecting " + batch.length + " file(s) via " + kind + " input");
+      return drop.mountAndInject(kind, batch).then(function (ok) {
+        drop.log(kind + " inject " + (ok ? "dispatched" : "FAILED"));
+        return drop.waitFor(drop.composerOpen, 1800).then(function (open) {
+          drop.log("composer " + (open ? "opened" : "NOT detected") + " (" + kind + ")");
+          if (!open) return;
+          // Hold the queue until this composer closes (sent/cancelled), so the
+          // next drop doesn't fight it for the attach flow. Bounded wait.
+          return drop.waitFor(function () { return !drop.composerOpen(); }, 120000);
+        });
       });
     };
 
-    window.__whatrustHandleDrop = function (fileObjs) {
+    // Rust-side feed. Messages: {op:"begin",drop,file,name,type,size} ->
+    // {op:"chunk",drop,file,b64}* -> {op:"end",drop,file} | {op:"abort",drop,file},
+    // then one {op:"commit",drop,files}. Returns a string ack for commit (read by
+    // eval_with_callback in Rust, proving the handler executed).
+    window.__whatrustDropFeed = function (msg) {
       try {
-        if (!Array.isArray(fileObjs) || fileObjs.length === 0) return;
-        var fresh = drop.dedupe(fileObjs);
-        if (fresh.length === 0) {
-          drop.log("duplicate drop ignored");
-          return;
+        if (!msg || typeof msg.drop !== "number") return "BADMSG";
+        var st = drop.state(msg.drop);
+        if (msg.op === "begin") {
+          st.files[msg.file] = {
+            name: String(msg.name || "file"),
+            type: String(msg.type || "application/octet-stream"),
+            size: msg.size >>> 0,
+            parts: [],
+            got: 0,
+            done: false,
+          };
+          return "OK";
         }
-        var files = fresh.map(function (f) {
-          return drop.b64ToFile(f.b64, f.name, f.type);
-        });
-        var media = files.filter(function (f) {
-          return drop.isMedia(f.type);
-        });
-        var docs = files.filter(function (f) {
-          return !drop.isMedia(f.type);
-        });
-        drop.log("drop: " + media.length + " media + " + docs.length + " document file(s)");
-
-        // A single drop opens one composer, so handle one group. Media wins if both are
-        // present (the rarer mixed case logs the leftover for a follow-up drop).
-        var kind = media.length ? "media" : "document";
-        var batch = media.length ? media : docs;
-        drop.mountAndInject(kind, batch).then(function (ok) {
-          drop.log(kind + " inject " + (ok ? "dispatched" : "FAILED"));
-          if (media.length && docs.length) {
-            drop.log("note: " + docs.length + " document(s) skipped — drop them separately");
+        var f = st.files[msg.file];
+        if (msg.op === "chunk") {
+          if (!f || f.done) return "NOFILE";
+          var bytes = drop.b64ToBytes(msg.b64 || "");
+          f.parts.push(bytes);
+          f.got += bytes.length;
+          return "OK";
+        }
+        if (msg.op === "end") {
+          if (f) f.done = true;
+          return "OK";
+        }
+        if (msg.op === "abort") {
+          delete st.files[msg.file];
+          drop.log("drop #" + st.id + " file " + msg.file + " aborted by sender");
+          return "OK";
+        }
+        if (msg.op === "commit") {
+          if (st.gc) clearTimeout(st.gc);
+          delete drop.pending[st.id];
+          var files = [];
+          for (var k in st.files) {
+            var e = st.files[k];
+            if (!e.done || e.got !== e.size) {
+              drop.log("drop #" + st.id + " file " + k + " incomplete (" + e.got + "/" + e.size + "), skipped");
+              continue;
+            }
+            files.push(new File(e.parts, e.name, { type: e.type }));
+            e.parts = null; // release chunk references once the File owns the data
           }
-          drop.waitFor(drop.composerOpen, 1800).then(function (open) {
-            drop.log("composer " + (open ? "opened" : "NOT detected") + " (" + kind + ")");
+          if (files.length === 0) return "EMPTY";
+          drop.runQueued(function () {
+            return drop.injectBatch(files).catch(function (e) {
+              drop.log("inject error: " + e);
+            });
           });
-        });
+          return "QUEUED:" + files.length;
+        }
+        return "BADOP";
       } catch (e) {
-        drop.log("handler error: " + e);
+        drop.log("feed error: " + e);
+        return "ERR";
       }
     };
-    drop.log("drop injector v2 (type-routed) ready");
+    drop.log("drop injector v3 (chunked, queued, no-loss routing) ready");
   } catch (e) {}
 })();

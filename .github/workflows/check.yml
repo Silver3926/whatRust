@@ -36,3 +36,20 @@ jobs:
       - name: cargo build (compile check)
         working-directory: src-tauri
         run: cargo build --locked
+
+      # Behavioral gates: the unit tests cover the drag-drop planning/streaming
+      # pipeline, download destinations, MIME routing, and UA/client-hints
+      # consistency — building alone caught none of the drop regressions.
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: bridge.js drop-injector tests (mock DOM, zero deps)
+        run: node src-tauri/resources/bridge.test.mjs
+
+      - name: settings-ui hotkey tests
+        run: node settings-ui/comboToAccelerator.test.mjs

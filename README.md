@@ -118,7 +118,7 @@ OS supports it — before showing your chats. Enable it under **Settings → Sec
 |---|---|---|
 | **Linux** | WebKitGTK | Requires WebKitGTK **≥ 2.46.1** (older versions hang WhatsApp's QR login). AppImage may need `libfuse2`. |
 | **Windows 10/11** | WebView2 | Uses the Evergreen WebView2 runtime (preinstalled on Windows 11). |
-| **macOS** | WKWebView | macOS 12+ (running **multiple accounts** needs macOS 14+); the current build is Apple Silicon (arm64). |
+| **macOS** | WKWebView | macOS 12.1+ (SharedArrayBuffer for video upload needs Safari/WebKit 15.2; running **multiple accounts** needs macOS 14+); the current build is Apple Silicon (arm64). |
 
 ## Installation
 
@@ -177,7 +177,7 @@ whatRust's own native shell is small — around 90 MB. Your **total** memory use
 Its native shell is lighter because it doesn't bundle a Chromium browser engine the way the Electron-based official app does, so it has less baseline overhead. The WhatsApp Web content itself uses a similar amount in either app.
 
 ### Which operating systems does whatRust support?
-Linux (WebKitGTK), Windows 10/11 (WebView2), and macOS 12+ (WKWebView).
+Linux (WebKitGTK), Windows 10/11 (WebView2), and macOS 12.1+ (WKWebView).
 
 ### Is whatRust free and open source?
 Yes — whatRust is free and open source under the MIT License. The source is on [GitHub](https://github.com/karem505/whatRust).
@@ -215,6 +215,8 @@ whatRust only loads the official `web.whatsapp.com` in a native webview and adds
 - **Windows unread count**: Windows tray icons ignore text labels, so the unread *number* appears only in the hover tooltip (the icon still switches to a badged variant). macOS and Linux show the count.
 - **Notification click** does not yet focus the window — use the tray icon or the global shortcut.
 - **macOS** builds are unsigned and currently Apple Silicon (arm64) only.
+- **macOS drag-and-drop from Photos.app** (and other apps that "promise" files rather than providing real paths, e.g. dragging an image straight out of a browser) isn't supported by the system webview layer — whatRust shows a hint instead of silently ignoring the drop. Drag from Finder, or use the attach (+) button.
+- **Drag-and-drop limits**: up to 30 files per drop, 100 MB per file, 300 MB per drop total (larger files can always be sent via WhatsApp's attach (+) → Document picker, which is not routed through these limits). Skipped files are reported in a notification.
 - **Multiple accounts on macOS** require macOS 14+ (older macOS runs a single account); Linux and Windows are unrestricted.
 
 ## Contributing

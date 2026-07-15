@@ -5,12 +5,24 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder}
 /// Bump the major version occasionally, and keep it in sync with the client-hints
 /// shim in `resources/bridge.js` (brands/fullVersionList/uaFullVersion).
 ///
+/// Per-OS variants: on Windows WebView2 exposes REAL Chromium client hints with
+/// platform "Windows", and on macOS the engine is WKWebView — advertising an
+/// "X11; Linux" UA there produces a self-contradictory browser fingerprint, so
+/// each OS claims the Chrome build that actually matches its platform token.
+///
 /// NOTE (Linux): setting this alone is NOT enough — WebKitGTK's site-specific
 /// quirks override the embedder UA for web.whatsapp.com with a fake macOS Safari
 /// string. `enable_webview_media` turns quirks off so this UA actually reaches
 /// the site.
+#[cfg(target_os = "linux")]
 pub const CHROME_UA: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
+#[cfg(target_os = "windows")]
+pub const CHROME_UA: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
+#[cfg(target_os = "macos")]
+pub const CHROME_UA: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
 
 const BRIDGE_JS: &str = include_str!("../resources/bridge.js");
 const APP_ICON: &[u8] = include_bytes!("../icons/128x128.png");
@@ -41,8 +53,8 @@ pub fn open_account_window(
         .icon(icon)?
         .user_agent(CHROME_UA)
         .initialization_script(BRIDGE_JS)
-        // Drag-and-drop is done by capturing the OS drop in Rust and injecting the file
-        // into the page (see `register_drop_handler` + bridge.js `__whatrustHandleDrop`).
+        // Drag-and-drop is done by capturing the OS drop in Rust and streaming the file
+        // into the page (see `register_drop_handler` + bridge.js `__whatrustDropFeed`).
         // We deliberately KEEP Tauri's drag-drop handler enabled: on Linux/webkit2gtk the
         // native webview never delivers a file drop into the page DOM (broken on Wayland;
         // on X11 the GTK drop is accepted — the "+" cursor shows — but it still never
@@ -127,119 +139,414 @@ pub fn open_account_window(
     Ok(win)
 }
 
-/// Largest single dropped file we will inline-inject into the page. base64 over `eval`
-/// is ~1.33x the byte size and held in memory, so keep it bounded; larger files are
-/// skipped (with a log line) rather than risking an OOM or a long UI stall.
+/// Largest single dropped file we will inline-inject into the page. The page must
+/// hold the decoded bytes to build the `File`, so keep it bounded; larger files are
+/// skipped (with a user-visible toast) rather than risking an OOM or a long UI stall.
 const MAX_DROP_FILE_BYTES: u64 = 100 * 1024 * 1024;
-/// Cap how many files one drop can inject (WhatsApp itself limits a batch anyway).
+/// Aggregate raw-byte budget for ONE drop. Files are individually capped, but the
+/// page holds every accepted file of a batch in memory at once — without a batch
+/// budget, 30 near-cap files still meant multiple GiB in flight.
+const MAX_DROP_TOTAL_BYTES: u64 = 300 * 1024 * 1024;
+/// Cap how many files one drop can inject, counted over files that actually pass
+/// the checks (a folder or an oversized file does not use up a slot).
 const MAX_DROP_FILES: usize = 30;
+/// Raw bytes per streamed chunk eval. A multiple of 3, so every non-final chunk
+/// base64-encodes standalone without padding and the page can decode chunks
+/// independently. ~4 MiB raw ≈ 5.6 MiB base64 per eval — far below WebView2's
+/// cross-process message ceiling (the old single-eval transport marshaled a
+/// 100 MiB file as ~266 MiB of UTF-16 in one ExecuteScript and could die
+/// silently), and it keeps peak memory at one chunk instead of one file.
+const DROP_CHUNK_BYTES: usize = 85 * 48 * 1024; // 4_177_920, multiple of 3
 
 /// Capture OS file drops and inject them into WhatsApp Web.
 ///
 /// On Linux the webview never delivers the drop into the page DOM, so Tauri's
 /// drag-drop handler (kept enabled in the builder) is our only source of the dropped
-/// paths. We read the files off the UI thread, base64-encode them, and `eval` a call
-/// to the page-side `__whatrustHandleDrop` (defined in bridge.js), which rebuilds the
-/// `File`s and hands them to WhatsApp's own attach flow. Every boundary is logged to
-/// the diagnostic log (see dlog.rs) so a failure can be pinpointed without a console.
+/// paths — and because that handler consumes the drop on every platform, Windows and
+/// macOS drops arrive here too. Files are read off the UI thread and streamed to the
+/// page-side `__whatrustDropFeed` (bridge.js) as begin/chunk/end messages keyed by a
+/// process-unique drop id, then committed; bridge.js rebuilds the `File`s and hands
+/// them to WhatsApp's own attach flow. The commit runs through `eval_with_callback`,
+/// so "the page actually executed the handler" is confirmed instead of assumed, and
+/// every skipped file is surfaced to the user as a toast (not just a log line).
 fn register_drop_handler(win: &WebviewWindow) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // Process-wide drop id: lets the page key concurrent streams from several
+    // windows/drops without guessing by file name or content.
+    static DROP_SEQ: AtomicU64 = AtomicU64::new(1);
     let win = win.clone();
     win.clone().on_window_event(move |event| {
         let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, position }) = event
         else {
             return;
         };
+        let drop_id = DROP_SEQ.fetch_add(1, Ordering::Relaxed);
         crate::dlog::log(&format!(
-            "dragdrop: Drop {} path(s) at ({:.0},{:.0})",
+            "dragdrop: drop #{drop_id}: {} path(s) at ({:.0},{:.0})",
             paths.len(),
             position.x,
             position.y
         ));
+        if paths.is_empty() {
+            // Seen on macOS for promise-only drag sources (e.g. dragging straight out
+            // of Photos.app): wry reads only NSFilenamesPboardType, so the drop lands
+            // with zero paths. Tell the user instead of silently doing nothing.
+            crate::notify::show(
+                win.app_handle(),
+                "Nothing was attached",
+                "That item can't be dropped directly. Drag the file from your file manager, or use the attach (+) button.",
+            );
+            return;
+        }
         let paths = paths.clone();
-        let (x, y) = (position.x, position.y);
         let w = win.clone();
-        // Read + encode off the UI thread: a large video would otherwise stall the window.
-        std::thread::spawn(move || match build_drop_payload(&paths) {
-            Some(json) if json != "[]" => {
-                let js = format!(
-                    "window.__whatrustHandleDrop&&window.__whatrustHandleDrop({json},{x},{y});"
-                );
-                match w.eval(&js) {
-                    Ok(()) => crate::dlog::log("dragdrop: injection dispatched to page"),
-                    Err(e) => crate::dlog::log(&format!("dragdrop: eval failed: {e}")),
-                }
-            }
-            _ => crate::dlog::log("dragdrop: nothing injectable (empty/too large/unreadable)"),
-        });
+        // Read + stream off the UI thread: a large video would otherwise stall the window.
+        std::thread::spawn(move || stream_drop(&w, drop_id, &paths));
     });
 }
 
-/// Read the dropped files into a JSON array `[{name,type,b64}]` for the page-side
-/// injector. Skips anything too large, non-regular, or unreadable (logging each skip).
-///
-/// Memory: each file's base64 is streamed straight into the shared output buffer (see
-/// [`append_file_base64`]), reading the file in bounded chunks. A large video is therefore
-/// never simultaneously resident as raw bytes *and* a base64 `String` *and* a
-/// `serde_json::Value` *and* the serialized output (the old path held ~4 full copies — a
-/// 100 MB drop peaked near half a gigabyte). Peak extra allocation is now ~1.33x the base64
-/// of the single largest file (the transport itself) plus a fixed 48 KiB read buffer.
-fn build_drop_payload(paths: &[std::path::PathBuf]) -> Option<String> {
-    let mut out = String::from("[");
-    let mut wrote_any = false;
-    for p in paths.iter().take(MAX_DROP_FILES) {
-        let name = p
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("file")
-            .to_string();
+/// Why a file in a drop was skipped. Counters only — never file names (the summary
+/// feeds a toast and the no-PII diagnostic log).
+#[derive(Default, Debug, PartialEq, Eq)]
+struct DropSkips {
+    too_large: usize,
+    over_budget: usize,
+    over_count: usize,
+    not_file: usize,
+    unreadable: usize,
+    changed: usize,
+}
+
+impl DropSkips {
+    fn total(&self) -> usize {
+        self.too_large
+            + self.over_budget
+            + self.over_count
+            + self.not_file
+            + self.unreadable
+            + self.changed
+    }
+}
+
+/// One accepted file of a drop, decided by [`plan_drop`] before any bytes move.
+struct PlannedFile {
+    path: std::path::PathBuf,
+    name: String,
+    mime: &'static str,
+    len: u64,
+}
+
+/// Decide which dropped paths are injectable, applying the per-file cap, the batch
+/// byte budget, and the file-count cap — counting only files that actually qualify
+/// (30 unreadable paths must not starve a valid 31st). Pure planning: no page I/O.
+fn plan_drop(paths: &[std::path::PathBuf]) -> (Vec<PlannedFile>, DropSkips) {
+    let mut planned = Vec::new();
+    let mut skips = DropSkips::default();
+    let mut budget = MAX_DROP_TOTAL_BYTES;
+    for (idx, p) in paths.iter().enumerate() {
+        if planned.len() == MAX_DROP_FILES {
+            skips.over_count += 1;
+            continue;
+        }
         let meta = match std::fs::metadata(p) {
             Ok(m) => m,
             Err(e) => {
-                crate::dlog::log(&format!("dragdrop: stat '{name}' failed: {e}"));
+                crate::dlog::log(&format!("dragdrop: file {idx}: stat failed: {e}"));
+                skips.unreadable += 1;
                 continue;
             }
         };
         if !meta.is_file() {
-            crate::dlog::log(&format!("dragdrop: skip '{name}': not a regular file"));
+            crate::dlog::log(&format!("dragdrop: file {idx}: skip, not a regular file"));
+            skips.not_file += 1;
             continue;
         }
-        if meta.len() > MAX_DROP_FILE_BYTES {
+        let len = meta.len();
+        if len > MAX_DROP_FILE_BYTES {
             crate::dlog::log(&format!(
-                "dragdrop: skip '{name}': {} bytes over the {MAX_DROP_FILE_BYTES} cap",
-                meta.len()
+                "dragdrop: file {idx}: skip, {len} bytes over the {MAX_DROP_FILE_BYTES} cap"
             ));
+            skips.too_large += 1;
             continue;
         }
-        // Rollback point: if the file read fails partway through streaming its base64, we
-        // truncate the half-written object (and its leading separator) so `out` stays valid
-        // JSON. serde_json escapes the name/type strings; base64's alphabet (A-Za-z0-9+/=)
-        // needs no JSON escaping, so it is written raw between the quotes.
-        let mark = out.len();
-        if wrote_any {
-            out.push(',');
+        if len > budget {
+            crate::dlog::log(&format!(
+                "dragdrop: file {idx}: skip, {len} bytes over the remaining batch budget"
+            ));
+            skips.over_budget += 1;
+            continue;
         }
-        out.push_str("{\"name\":");
-        out.push_str(&serde_json::to_string(&name).unwrap_or_else(|_| "\"file\"".to_string()));
-        out.push_str(",\"type\":");
-        out.push_str(
-            &serde_json::to_string(mime_for(&name))
-                .unwrap_or_else(|_| "\"application/octet-stream\"".to_string()),
-        );
-        out.push_str(",\"b64\":\"");
-        match append_file_base64(&mut out, p) {
-            Ok(n) => {
-                out.push_str("\"}");
-                wrote_any = true;
-                crate::dlog::log(&format!("dragdrop: read '{name}' ({n} bytes)"));
+        budget -= len;
+        // to_string_lossy (not to_str+"file"): a name with invalid Unicode keeps its
+        // (usually ASCII) extension, so MIME routing still works.
+        let name = p
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".into());
+        let mime = mime_for(&name);
+        planned.push(PlannedFile {
+            path: p.clone(),
+            name,
+            mime,
+            len,
+        });
+    }
+    (planned, skips)
+}
+
+/// Human summary of skipped files for the toast. Counts and reasons only — no names.
+fn summarize_skips(s: &DropSkips) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let plural = |n: usize| if n == 1 { "file" } else { "files" };
+    if s.too_large > 0 {
+        parts.push(format!(
+            "{} {} over the 100 MB size limit",
+            s.too_large,
+            plural(s.too_large)
+        ));
+    }
+    if s.over_budget > 0 {
+        parts.push(format!(
+            "{} {} over the 300 MB per-drop total",
+            s.over_budget,
+            plural(s.over_budget)
+        ));
+    }
+    if s.over_count > 0 {
+        parts.push(format!(
+            "{} {} over the 30-file limit",
+            s.over_count,
+            plural(s.over_count)
+        ));
+    }
+    if s.not_file > 0 {
+        parts.push(format!(
+            "{} folder(s) or special {}",
+            s.not_file,
+            plural(s.not_file)
+        ));
+    }
+    if s.unreadable > 0 {
+        parts.push(format!(
+            "{} unreadable {}",
+            s.unreadable,
+            plural(s.unreadable)
+        ));
+    }
+    if s.changed > 0 {
+        parts.push(format!(
+            "{} {} that changed while reading",
+            s.changed,
+            plural(s.changed)
+        ));
+    }
+    format!("Not attached: {}.", parts.join(", "))
+}
+
+/// Why streaming one file to the page stopped.
+enum StreamAbort {
+    /// The file could not be read.
+    Io(std::io::Error),
+    /// The file's size changed between planning and reading (TOCTOU guard) — a
+    /// truncated or overgrown snapshot would inject a corrupt file, so it is dropped.
+    Changed,
+    /// `eval` into the webview failed; the whole drop is abandoned.
+    Eval(tauri::Error),
+}
+
+// --- page-message builders (pure, unit-tested) ---
+
+fn drop_msg_begin(drop_id: u64, idx: usize, name: &str, mime: &str, len: u64) -> String {
+    let name_json = serde_json::to_string(name).unwrap_or_else(|_| "\"file\"".into());
+    format!(
+        "window.__whatrustDropFeed&&window.__whatrustDropFeed({{op:\"begin\",drop:{drop_id},file:{idx},name:{name_json},type:\"{mime}\",size:{len}}});"
+    )
+}
+
+fn drop_msg_chunk_prefix(drop_id: u64, idx: usize) -> String {
+    format!(
+        "window.__whatrustDropFeed&&window.__whatrustDropFeed({{op:\"chunk\",drop:{drop_id},file:{idx},b64:\""
+    )
+}
+
+const DROP_MSG_CHUNK_SUFFIX: &str = "\"});";
+
+fn drop_msg_end(drop_id: u64, idx: usize) -> String {
+    format!(
+        "window.__whatrustDropFeed&&window.__whatrustDropFeed({{op:\"end\",drop:{drop_id},file:{idx}}});"
+    )
+}
+
+fn drop_msg_abort(drop_id: u64, idx: usize) -> String {
+    format!(
+        "window.__whatrustDropFeed&&window.__whatrustDropFeed({{op:\"abort\",drop:{drop_id},file:{idx}}});"
+    )
+}
+
+fn drop_msg_commit(drop_id: u64, files: usize) -> String {
+    // Ternary (not &&) so a missing handler yields a distinguishable "NOHANDLER"
+    // ack through eval_with_callback instead of silently evaluating to undefined.
+    format!(
+        "window.__whatrustDropFeed?window.__whatrustDropFeed({{op:\"commit\",drop:{drop_id},files:{files}}}):\"NOHANDLER\""
+    )
+}
+
+/// Read exactly `expected` bytes from `r`, emitting standalone base64 chunks of
+/// [`DROP_CHUNK_BYTES`] raw bytes each (final chunk shorter, padded). Returns
+/// [`StreamAbort::Changed`] if the stream ends early or still has data past
+/// `expected` — the size was validated at plan time, so a mismatch means the file
+/// was modified in between and its snapshot cannot be trusted.
+fn stream_chunks<R: std::io::Read>(
+    r: &mut R,
+    expected: u64,
+    mut emit: impl FnMut(&str) -> Result<(), StreamAbort>,
+) -> Result<(), StreamAbort> {
+    let mut buf = [0u8; 48 * 1024];
+    let mut chunk: Vec<u8> = Vec::with_capacity(DROP_CHUNK_BYTES.min(expected as usize + 2));
+    let mut b64 = String::new();
+    let mut total: u64 = 0;
+    loop {
+        let want = std::cmp::min(buf.len() as u64, expected - total) as usize;
+        if want == 0 {
+            break;
+        }
+        let n = r.read(&mut buf[..want]).map_err(StreamAbort::Io)?;
+        if n == 0 {
+            return Err(StreamAbort::Changed); // shrank below the planned size
+        }
+        total += n as u64;
+        chunk.extend_from_slice(&buf[..n]);
+        while chunk.len() >= DROP_CHUNK_BYTES {
+            b64.clear();
+            base64_encode_into(&mut b64, &chunk[..DROP_CHUNK_BYTES]);
+            emit(&b64)?;
+            chunk.drain(..DROP_CHUNK_BYTES);
+        }
+    }
+    // One extra read probes for growth past the planned size.
+    if r.read(&mut buf[..1]).map_err(StreamAbort::Io)? != 0 {
+        return Err(StreamAbort::Changed);
+    }
+    if !chunk.is_empty() || expected == 0 {
+        b64.clear();
+        base64_encode_into(&mut b64, &chunk);
+        emit(&b64)?;
+    }
+    Ok(())
+}
+
+/// Stream one planned file to the page as begin + chunk(s) + end.
+fn stream_one_file(
+    w: &WebviewWindow,
+    drop_id: u64,
+    idx: usize,
+    f: &PlannedFile,
+) -> Result<(), StreamAbort> {
+    let mut file = std::fs::File::open(&f.path).map_err(StreamAbort::Io)?;
+    // fstat on the open handle: the authoritative size for the bytes we will read
+    // (the plan-time stat raced against renames/writes).
+    let len = file.metadata().map_err(StreamAbort::Io)?.len();
+    if len != f.len || len > MAX_DROP_FILE_BYTES {
+        return Err(StreamAbort::Changed);
+    }
+    w.eval(drop_msg_begin(drop_id, idx, &f.name, f.mime, len))
+        .map_err(StreamAbort::Eval)?;
+    let prefix = drop_msg_chunk_prefix(drop_id, idx);
+    let result = stream_chunks(&mut file, len, |b64| {
+        let mut js = String::with_capacity(prefix.len() + b64.len() + DROP_MSG_CHUNK_SUFFIX.len());
+        js.push_str(&prefix);
+        js.push_str(b64); // base64 alphabet needs no JS-string escaping
+        js.push_str(DROP_MSG_CHUNK_SUFFIX);
+        w.eval(js).map_err(StreamAbort::Eval)
+    });
+    match result {
+        Ok(()) => w
+            .eval(drop_msg_end(drop_id, idx))
+            .map_err(StreamAbort::Eval),
+        Err(e) => {
+            // Best-effort: tell the page to discard the partial file.
+            if !matches!(e, StreamAbort::Eval(_)) {
+                let _ = w.eval(drop_msg_abort(drop_id, idx));
             }
-            Err(e) => {
-                out.truncate(mark);
-                crate::dlog::log(&format!("dragdrop: read '{name}' failed: {e}"));
+            Err(e)
+        }
+    }
+}
+
+/// Plan, stream, and commit one OS drop, then surface the outcome to the user.
+fn stream_drop(w: &WebviewWindow, drop_id: u64, paths: &[std::path::PathBuf]) {
+    let (planned, mut skips) = plan_drop(paths);
+    let mut streamed = 0usize;
+    for (idx, f) in planned.iter().enumerate() {
+        match stream_one_file(w, drop_id, idx, f) {
+            Ok(()) => {
+                crate::dlog::log(&format!(
+                    "dragdrop: drop #{drop_id} file {idx}: streamed {} bytes ({})",
+                    f.len, f.mime
+                ));
+                streamed += 1;
+            }
+            Err(StreamAbort::Io(e)) => {
+                crate::dlog::log(&format!(
+                    "dragdrop: drop #{drop_id} file {idx}: read failed: {e}"
+                ));
+                skips.unreadable += 1;
+            }
+            Err(StreamAbort::Changed) => {
+                crate::dlog::log(&format!(
+                    "dragdrop: drop #{drop_id} file {idx}: skip, changed while reading"
+                ));
+                skips.changed += 1;
+            }
+            Err(StreamAbort::Eval(e)) => {
+                crate::dlog::log(&format!(
+                    "dragdrop: drop #{drop_id}: eval failed, abandoning drop: {e}"
+                ));
+                crate::notify::show(
+                    w.app_handle(),
+                    "Files not attached",
+                    "The dropped files couldn't be handed to WhatsApp. Please try again.",
+                );
+                return;
             }
         }
     }
-    out.push(']');
-    Some(out)
+    if streamed > 0 {
+        // eval_with_callback: the ack proves the page-side handler actually ran —
+        // a plain eval() Ok only means "queued", which used to be logged as success
+        // even when injection never happened.
+        let app = w.app_handle().clone();
+        let commit = drop_msg_commit(drop_id, streamed);
+        let res = w.eval_with_callback(commit, move |ack| {
+            let ack = ack.trim().to_string();
+            crate::dlog::log(&format!("dragdrop: drop #{drop_id} commit ack: {ack}"));
+            // NOHANDLER: bridge.js isn't loaded (page mid-navigation). EMPTY: the
+            // page received no complete file (chunks lost). Both mean nothing
+            // attached — say so instead of leaving the user staring at nothing.
+            if ack.contains("NOHANDLER") || ack.contains("EMPTY") {
+                crate::notify::show(
+                    &app,
+                    "Files not attached",
+                    "WhatsApp wasn't ready to receive the dropped files. Please try again.",
+                );
+            }
+        });
+        match res {
+            Ok(()) => crate::dlog::log(&format!(
+                "dragdrop: drop #{drop_id}: committed {streamed} file(s), awaiting ack"
+            )),
+            Err(e) => crate::dlog::log(&format!(
+                "dragdrop: drop #{drop_id}: commit eval failed: {e}"
+            )),
+        }
+    }
+    if skips.total() > 0 {
+        crate::notify::show(
+            w.app_handle(),
+            "Some files were not attached",
+            &summarize_skips(&skips),
+        );
+    }
 }
 
 /// Best-effort MIME from the file extension, so WhatsApp routes images/videos/docs to
@@ -260,22 +567,22 @@ fn mime_for(name: &str) -> &'static str {
         // Images (image/* -> routed to the Photos & Videos composer by bridge.js). Limited to
         // formats WhatsApp's photo composer accepts, so nothing regresses to "not supported".
         "png" => "image/png",
-        "jpg" | "jpeg" | "jfif" => "image/jpeg",
+        "jpg" | "jpeg" | "jpe" | "jfif" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
         "avif" => "image/avif",
         "bmp" => "image/bmp",
         "svg" => "image/svg+xml",
         "heic" => "image/heic",
-        "heif" => "image/heif",
+        "heif" | "hif" => "image/heif",
         // Video. Only mp4/3gpp/quicktime are accepted by WhatsApp's media input (bridge.js
         // NATIVE_VIDEO); the rest still send, as a document, but with a correct label.
         "mp4" | "m4v" => "video/mp4",
-        "mov" => "video/quicktime",
+        "mov" | "qt" => "video/quicktime",
         "webm" => "video/webm",
         "mkv" => "video/x-matroska",
-        "3gp" => "video/3gpp",
-        "3g2" => "video/3gpp2",
+        "3gp" | "3gpp" => "video/3gpp",
+        "3g2" | "3gp2" | "3gpp2" => "video/3gpp2",
         "avi" => "video/x-msvideo",
         "mpeg" | "mpg" => "video/mpeg",
         "mts" | "m2ts" => "video/mp2t",
@@ -325,8 +632,8 @@ fn mime_for(name: &str) -> &'static str {
 ///
 /// Encodes per 3-byte group, padding only a final partial group. Callers that feed data
 /// across multiple calls (streaming) MUST pass whole 3-byte groups on every call except the
-/// last — otherwise an interior partial group would be padded mid-stream. [`append_file_base64`]
-/// upholds that contract via a small carry buffer.
+/// last — otherwise an interior partial group would be padded mid-stream. [`stream_chunks`]
+/// upholds that contract by emitting whole [`DROP_CHUNK_BYTES`] (multiple-of-3) chunks.
 fn base64_encode_into(out: &mut String, data: &[u8]) {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     out.reserve(data.len().div_ceil(3) * 4);
@@ -351,66 +658,13 @@ fn base64_encode_into(out: &mut String, data: &[u8]) {
 }
 
 /// Standard base64 of `data` as an owned `String`. Thin wrapper over [`base64_encode_into`].
-/// Only the streaming `append_file_base64` is used in production now, so this whole-buffer
+/// Only the chunked [`stream_chunks`] is used in production now, so this whole-buffer
 /// form is exercised by the tests (as the parity oracle) — hence `cfg(test)`.
 #[cfg(test)]
 fn base64_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     base64_encode_into(&mut out, data);
     out
-}
-
-/// Append the base64 of the file at `path` to `out`, reading in bounded 48 KiB chunks so the
-/// file is never fully resident in memory — the key to dropping a large *video* without a
-/// half-gigabyte spike. Returns the number of bytes read.
-///
-/// base64 must be emitted in whole 3-byte groups (only the final group is padded), but a
-/// `read` can return any number of bytes, so a 0–2 byte `carry` holds the bytes that don't
-/// yet complete a group and rolls them into the next read; the EOF flush pads whatever
-/// remains. Every encode call but the EOF flush is therefore a multiple of three bytes.
-///
-/// The 48 KiB stack buffer is already large, so we read the `File` directly rather than
-/// wrapping it in a `BufReader` (which would only add a redundant intermediate copy here).
-fn append_file_base64(out: &mut String, path: &std::path::Path) -> std::io::Result<u64> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let mut buf = [0u8; 48 * 1024]; // 49152 = an exact number of 3-byte groups
-    let mut carry = [0u8; 3];
-    let mut carry_len = 0usize;
-    let mut total: u64 = 0;
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        total += n as u64;
-        let data = &buf[..n];
-        let mut i = 0;
-        // 1) Top up a carried partial group from the front of this read, then flush it.
-        while carry_len > 0 && carry_len < 3 && i < n {
-            carry[carry_len] = data[i];
-            carry_len += 1;
-            i += 1;
-        }
-        if carry_len == 3 {
-            base64_encode_into(out, &carry); // a full group → no padding
-            carry_len = 0;
-        }
-        // 2) Bulk-encode the complete 3-byte groups remaining in this read.
-        let remaining = n - i;
-        let groups = remaining - (remaining % 3);
-        if groups > 0 {
-            base64_encode_into(out, &data[i..i + groups]);
-        }
-        // 3) Stash the trailing 0–2 bytes as the new carry.
-        for &b in &data[i + groups..n] {
-            carry[carry_len] = b;
-            carry_len += 1;
-        }
-    }
-    // EOF: encode whatever is left in the carry, padding the final partial group.
-    base64_encode_into(out, &carry[..carry_len]);
-    Ok(total)
 }
 
 /// Make sure a platform-suggested download `destination` is usable: keep an
@@ -727,8 +981,10 @@ pub fn open_settings_window(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_file_base64, base64_encode, build_drop_payload, ensure_download_destination,
-        mime_for, toggle_decision, ToggleAct, CHROME_UA,
+        base64_encode, drop_msg_begin, drop_msg_chunk_prefix, drop_msg_commit, drop_msg_end,
+        ensure_download_destination, mime_for, plan_drop, stream_chunks, summarize_skips,
+        toggle_decision, DropSkips, StreamAbort, ToggleAct, CHROME_UA, DROP_CHUNK_BYTES,
+        DROP_MSG_CHUNK_SUFFIX, MAX_DROP_FILES,
     };
 
     #[test]
@@ -813,64 +1069,156 @@ mod tests {
     }
 
     #[test]
-    fn streaming_base64_matches_oneshot_across_chunk_boundary() {
-        // append_file_base64 reads in 48 KiB chunks and carries 0..2 bytes between reads.
-        // Exercise a size just past one chunk for each length-mod-3 case so the carry/padding
-        // path is covered, and confirm it byte-for-byte matches the one-shot encoder.
-        for extra in [0usize, 1, 2] {
-            let len = 48 * 1024 + 3 + extra;
+    fn stream_chunks_matches_oneshot_encoding() {
+        // Sizes covering: below one chunk (every length-mod-3 case), exactly one
+        // chunk, and just past a chunk boundary — chunk concatenation must equal
+        // the one-shot base64 of the whole input (non-final chunks are unpadded
+        // because DROP_CHUNK_BYTES is a multiple of 3).
+        for len in [
+            0usize,
+            1,
+            2,
+            3,
+            48 * 1024 + 1,
+            DROP_CHUNK_BYTES,
+            DROP_CHUNK_BYTES + 1,
+            DROP_CHUNK_BYTES + 2,
+        ] {
             let data: Vec<u8> = (0..len)
                 .map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8)
                 .collect();
-            let path = write_temp(&format!("stream{extra}.bin"), &data);
-            let mut streamed = String::from("prefix:"); // also proves it APPENDS, not overwrites
-            let n = append_file_base64(&mut streamed, &path).unwrap();
-            let _ = std::fs::remove_file(&path);
-            assert_eq!(n, len as u64);
-            assert_eq!(
-                streamed,
-                format!("prefix:{}", base64_encode(&data)),
-                "mismatch at extra={extra}"
-            );
+            let mut got = String::new();
+            let mut chunks = 0usize;
+            stream_chunks(&mut &data[..], len as u64, |b64| {
+                chunks += 1;
+                got.push_str(b64);
+                Ok(())
+            })
+            .unwrap_or_else(|_| panic!("stream failed at len={len}"));
+            assert_eq!(got, base64_encode(&data), "mismatch at len={len}");
+            let expect_chunks = std::cmp::max(1, len.div_ceil(DROP_CHUNK_BYTES));
+            assert_eq!(chunks, expect_chunks, "chunk count at len={len}");
         }
     }
 
     #[test]
-    fn empty_file_streams_to_empty_base64() {
-        let path = write_temp("empty.bin", b"");
-        let mut s = String::new();
-        let n = append_file_base64(&mut s, &path).unwrap();
-        let _ = std::fs::remove_file(&path);
-        assert_eq!(n, 0);
-        assert_eq!(s, "");
+    fn stream_chunks_rejects_shrunk_and_grown_files() {
+        // The reader enforces the planned size: fewer bytes than promised (file
+        // truncated mid-read) or extra bytes past it (file grew) must abort with
+        // Changed — the old code silently read to EOF, bypassing the size cap.
+        let data = vec![7u8; 100];
+        let shrunk = stream_chunks(&mut &data[..], 200, |_| Ok(()));
+        assert!(matches!(shrunk, Err(StreamAbort::Changed)), "shrunk file");
+        let grown = stream_chunks(&mut &data[..], 50, |_| Ok(()));
+        assert!(matches!(grown, Err(StreamAbort::Changed)), "grown file");
     }
 
     #[test]
-    fn build_drop_payload_roundtrips_name_type_b64() {
-        // A small image + a video spanning the read-chunk boundary: the JSON must parse, and
-        // each entry's name/type/b64 must round-trip (b64 == one-shot encoding of the bytes).
-        let img_bytes: Vec<u8> = vec![0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4, 5];
-        let vid_bytes: Vec<u8> = (0..(48 * 1024 + 5)).map(|i| (i % 251) as u8).collect();
-        let img = write_temp("shot.png", &img_bytes);
-        let vid = write_temp("clip.mp4", &vid_bytes);
-        let json = build_drop_payload(&[img.clone(), vid.clone()]).unwrap();
-        let _ = std::fs::remove_file(&img);
-        let _ = std::fs::remove_file(&vid);
-
-        let v: serde_json::Value = serde_json::from_str(&json).expect("payload must be valid JSON");
-        let arr = v.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0]["type"], "image/png");
-        assert_eq!(arr[0]["b64"], base64_encode(&img_bytes));
-        assert!(arr[0]["name"].as_str().unwrap().ends_with(".png"));
-        assert_eq!(arr[1]["type"], "video/mp4");
-        assert_eq!(arr[1]["b64"], base64_encode(&vid_bytes));
-        assert!(arr[1]["name"].as_str().unwrap().ends_with(".mp4"));
+    fn plan_drop_applies_per_file_and_total_caps_with_feedback() {
+        let small = write_temp("ok.mp4", &[1u8; 32]);
+        let dir = std::env::temp_dir();
+        let missing = std::path::PathBuf::from("/nonexistent/whatrust/gone.bin");
+        let (planned, skips) = plan_drop(&[small.clone(), dir, missing]);
+        let _ = std::fs::remove_file(&small);
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].mime, "video/mp4");
+        assert_eq!(planned[0].len, 32);
+        assert_eq!(skips.not_file, 1);
+        assert_eq!(skips.unreadable, 1);
+        assert_eq!(skips.total(), 2);
+        // The toast summary names both reasons, never file names.
+        let s = summarize_skips(&skips);
+        assert!(s.contains("folder"), "{s}");
+        assert!(s.contains("unreadable"), "{s}");
+        assert!(!s.contains("ok.mp4"), "{s}");
     }
 
     #[test]
-    fn build_drop_payload_empty_for_no_files() {
-        assert_eq!(build_drop_payload(&[]).unwrap(), "[]");
+    fn plan_drop_counts_only_valid_files_toward_the_cap() {
+        // 30 invalid paths followed by one valid file: the valid file must still be
+        // planned (the old `take(30)` burned slots on the invalid entries).
+        let valid = write_temp("late.png", &[9u8; 8]);
+        let mut paths: Vec<std::path::PathBuf> = (0..MAX_DROP_FILES)
+            .map(|i| std::path::PathBuf::from(format!("/nonexistent/whatrust/{i}.bin")))
+            .collect();
+        paths.push(valid.clone());
+        let (planned, skips) = plan_drop(&paths);
+        let _ = std::fs::remove_file(&valid);
+        assert_eq!(planned.len(), 1, "valid 31st file must survive");
+        assert_eq!(skips.unreadable, MAX_DROP_FILES);
+        assert_eq!(skips.over_count, 0);
+    }
+
+    #[test]
+    fn plan_drop_enforces_the_aggregate_budget() {
+        use std::io::Write;
+        // Three sparse-ish files of 150 MB nominal size would blow the 300 MB batch
+        // budget on the third. Use set_len to avoid writing real gigabytes.
+        let mut paths = Vec::new();
+        for i in 0..3 {
+            let p = std::env::temp_dir().join(format!(
+                "whatrust_test_{}_budget_{i}.bin",
+                std::process::id()
+            ));
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(90 * 1024 * 1024).unwrap();
+            drop(f);
+            // touch so metadata is fresh
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&p)
+                .unwrap()
+                .flush()
+                .unwrap();
+            paths.push(p);
+        }
+        // 90+90+90 = 270 MB fits; add a 4th to cross 300 MB.
+        let extra = std::env::temp_dir().join(format!(
+            "whatrust_test_{}_budget_extra.bin",
+            std::process::id()
+        ));
+        let f = std::fs::File::create(&extra).unwrap();
+        f.set_len(90 * 1024 * 1024).unwrap();
+        drop(f);
+        paths.push(extra.clone());
+        let (planned, skips) = plan_drop(&paths);
+        for p in &paths {
+            let _ = std::fs::remove_file(p);
+        }
+        assert_eq!(planned.len(), 3, "first 270 MB fit the 300 MB budget");
+        assert_eq!(
+            skips.over_budget, 1,
+            "the 4th file exceeds the batch budget"
+        );
+    }
+
+    #[test]
+    fn drop_messages_are_well_formed_and_guarded() {
+        let begin = drop_msg_begin(7, 0, "a \"quoted\" name.mp4", "video/mp4", 42);
+        assert!(begin.starts_with("window.__whatrustDropFeed&&"));
+        assert!(
+            begin.contains("\\\"quoted\\\""),
+            "name must be JSON-escaped"
+        );
+        assert!(begin.contains("size:42"));
+        let prefix = drop_msg_chunk_prefix(7, 0);
+        assert!(prefix.ends_with("b64:\""));
+        assert!(DROP_MSG_CHUNK_SUFFIX.starts_with('"'));
+        assert!(drop_msg_end(7, 0).contains("\"end\""));
+        // Commit uses a ternary so a missing handler acks "NOHANDLER" instead of
+        // silently evaluating to undefined.
+        let commit = drop_msg_commit(7, 3);
+        assert!(commit.contains("?window.__whatrustDropFeed("));
+        assert!(commit.ends_with(":\"NOHANDLER\""));
+    }
+
+    #[test]
+    fn skip_summary_reads_naturally_for_single_reasons() {
+        let s = summarize_skips(&DropSkips {
+            too_large: 1,
+            ..Default::default()
+        });
+        assert_eq!(s, "Not attached: 1 file over the 100 MB size limit.");
     }
 
     #[test]
@@ -915,6 +1263,17 @@ mod tests {
         assert_eq!(mime_for("book.epub"), "application/epub+zip");
         // Unknown extensions still fall back so the file always sends.
         assert_eq!(mime_for("mystery.qwerty"), "application/octet-stream");
+    }
+
+    #[test]
+    fn standard_extension_aliases_route_like_their_canonical_forms() {
+        // Aliases straight out of the freedesktop MIME database; these used to fall
+        // through to octet-stream and mis-route photos/videos as documents.
+        assert_eq!(mime_for("shot.jpe"), "image/jpeg");
+        assert_eq!(mime_for("clip.3gpp"), "video/3gpp");
+        assert_eq!(mime_for("movie.qt"), "video/quicktime");
+        assert_eq!(mime_for("pic.hif"), "image/heif");
+        assert_eq!(mime_for("clip.3gp2"), "video/3gpp2");
     }
 
     #[test]

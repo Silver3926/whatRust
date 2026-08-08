@@ -53,3 +53,9 @@ jobs:
 
       - name: settings-ui hotkey tests
         run: node settings-ui/comboToAccelerator.test.mjs
+
+      # The in-page dialogs replace alert/confirm/prompt, which do nothing under
+      # WKWebView. A regression here is invisible on Linux and Windows CI runners
+      # and shows up only as a dead button on macOS, so it needs a test.
+      - name: settings-ui dialog tests
+        run: node settings-ui/dialog.test.mjs

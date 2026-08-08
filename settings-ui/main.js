@@ -68,15 +68,19 @@ function renderAccounts(accounts) {
     renameBtn.className = "secondary";
     renameBtn.textContent = "Rename";
     renameBtn.addEventListener("click", async () => {
-      const next = prompt("Rename account", a.name);
-      if (next && next.trim() && next.trim() !== a.name) {
-        try {
-          await invoke("rename_account", { id: a.id, name: next.trim() });
-        } catch (e) {
-          alert(String(e));
-        }
-        await loadAccounts();
+      const next = await Dlg.prompt("", {
+        title: "Rename account",
+        value: a.name,
+        okLabel: "Rename",
+        requiredMessage: "An account needs a name.",
+      });
+      if (next === null || next === a.name) return;
+      try {
+        await invoke("rename_account", { id: a.id, name: next });
+      } catch (e) {
+        await Dlg.alert(String(e), { title: "Could not rename" });
       }
+      await loadAccounts();
     });
     row.appendChild(renameBtn);
 
@@ -85,11 +89,16 @@ function renderAccounts(accounts) {
     removeBtn.textContent = "Remove";
     removeBtn.disabled = !canRemove;
     removeBtn.addEventListener("click", async () => {
-      if (!confirm(`Remove account "${a.name}"? Its local session will be deleted.`)) return;
+      const ok = await Dlg.confirm(`Its local session will be deleted, and you will need to scan the QR code again to use this number.`, {
+        title: `Remove "${a.name}"?`,
+        okLabel: "Remove",
+        danger: true,
+      });
+      if (!ok) return;
       try {
         await invoke("remove_account", { id: a.id });
       } catch (e) {
-        alert(String(e));
+        await Dlg.alert(String(e), { title: "Could not remove" });
       }
       await loadAccounts();
     });
@@ -127,7 +136,7 @@ async function addAccount() {
       document.getElementById("add_account").disabled = true;
       document.getElementById("new_account_name").disabled = true;
     } else {
-      alert(msg);
+      await Dlg.alert(msg, { title: "Could not add account" });
     }
   }
 }
@@ -188,47 +197,64 @@ function wireLock() {
       document.getElementById("lock_pw1").value = "";
       document.getElementById("lock_pw2").value = "";
       await loadLock();
-    } catch (e) { alert(String(e)); }
+    } catch (e) { await Dlg.alert(String(e), { title: "Could not enable the lock" }); }
   });
 
   document.getElementById("lock_now").addEventListener("click", async () => {
-    try { await invoke("lock_app"); } catch (e) { alert(String(e)); }
+    try { await invoke("lock_app"); } catch (e) { await Dlg.alert(String(e), { title: "Could not lock" }); }
   });
 
   document.getElementById("change_pw").addEventListener("click", async () => {
-    const current = prompt("Current password:");
+    const current = await Dlg.prompt("", {
+      title: "Current password",
+      password: true,
+      okLabel: "Continue",
+      requiredMessage: "Enter your current password.",
+    });
     if (current === null) return;
-    const next = prompt("New password (min 4):");
-    if (!next) return;
+    const next = await Dlg.prompt("At least 4 characters.", {
+      title: "New password",
+      password: true,
+      okLabel: "Change",
+      requiredMessage: "Enter a new password.",
+    });
+    if (next === null) return;
     try {
       await invoke("change_app_lock_password", { current, new: next, confirm: next });
-      alert("Password changed.");
-    } catch (e) { alert(String(e)); }
+      await Dlg.alert("Your app-lock password has been changed.", { title: "Password changed" });
+    } catch (e) { await Dlg.alert(String(e), { title: "Could not change the password" }); }
   });
 
   document.getElementById("disable_lock").addEventListener("click", async () => {
-    const current = prompt("Enter your current password to disable the lock:");
+    const current = await Dlg.prompt("Enter your current password to turn the app lock off.", {
+      title: "Disable app lock",
+      password: true,
+      okLabel: "Disable",
+      danger: true,
+      requiredMessage: "Enter your current password.",
+    });
     if (current === null) return;
     try {
       await invoke("disable_app_lock", { current });
       await loadLock();
-    } catch (e) { alert(String(e)); }
+    } catch (e) { await Dlg.alert(String(e), { title: "Could not disable the lock" }); }
   });
 
   document.getElementById("biometric_enabled").addEventListener("change", async (e) => {
     try {
       await invoke("set_biometric_enabled", { enabled: e.target.checked });
     } catch (err) {
-      alert(String(err));
       e.target.checked = !e.target.checked; // revert on failure
+      await Dlg.alert(String(err), { title: "Could not change biometric unlock" });
     }
     await loadLock();
   });
 
+  const reportLockOptionFailure = (e) => Dlg.alert(String(e), { title: "Could not save" });
   for (const id of ["lock_on_launch", "lock_on_hide"]) {
-    document.getElementById(id).addEventListener("change", () => saveLockOptions().catch((e) => alert(String(e))));
+    document.getElementById(id).addEventListener("change", () => saveLockOptions().catch(reportLockOptionFailure));
   }
-  document.getElementById("idle_min").addEventListener("change", () => saveLockOptions().catch((e) => alert(String(e))));
+  document.getElementById("idle_min").addEventListener("change", () => saveLockOptions().catch(reportLockOptionFailure));
 }
 
 // --- Shortcut recorder ---

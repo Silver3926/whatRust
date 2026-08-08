@@ -108,6 +108,7 @@ pub fn set_settings(
         return Err("forbidden".into());
     }
     lock::require_unlocked(&app)?;
+    let settings = settings.sanitized();
     crate::settings::save(&app, &settings).map_err(|e| e.to_string())?;
     Ok(crate::settings::apply(&app, &settings))
 }

@@ -133,10 +133,33 @@ pub fn open_account_window(
         }
     });
 
+    apply_zoom(&win, crate::settings::load(app).zoom);
     register_focus_listener(app, &win);
     register_drop_handler(&win);
     enable_webview_media(&win);
     Ok(win)
+}
+
+/// Set the display zoom on one account webview.
+///
+/// This is a page zoom rather than a font-size override, because WhatsApp Web
+/// sizes nearly everything in px: scaling the page is what moves the chat list
+/// and the conversation pane together. Zooming out is also what buys back
+/// horizontal space on a high-DPI display, where the chat list otherwise takes a
+/// disproportionate share of the window.
+fn apply_zoom(win: &WebviewWindow, zoom: f64) {
+    // Unsupported below macOS 11; there the window keeps the site's own sizing.
+    let _ = win.set_zoom(crate::settings::sanitize_zoom(zoom));
+}
+
+/// Re-apply the display zoom to every open account window, so changing the
+/// setting takes effect immediately instead of at the next launch.
+pub fn apply_zoom_all(app: &AppHandle, zoom: f64) {
+    for a in accounts::load(app).accounts {
+        if let Some(w) = app.get_webview_window(&accounts::window_label(&a.id)) {
+            apply_zoom(&w, zoom);
+        }
+    }
 }
 
 /// Largest single dropped file we will inline-inject into the page. The page must

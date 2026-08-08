@@ -51,6 +51,7 @@ The official WhatsApp Desktop app is built on Electron, which packs an entire Ch
 - **Optional app lock** — password (Argon2id) or biometric (Windows Hello / Touch ID / Linux polkit); locks on launch, on demand, on hide-to-tray, or after idle
 - **System tray** icon with **close-to-tray** and an **unread message badge**
 - **Native OS notifications** for new messages
+- **Display size** — a Smaller / Small / Default / Big page zoom in Settings, so the chat list stops crowding out the conversation on a high-DPI screen
 - **Persistent login** — scan the QR code once, stay signed in across restarts
 - **Voice messages** everywhere, plus **voice & video calls** where the system webview ships WebRTC (Windows and macOS; most Linux distros build WebKitGTK without WebRTC, so calling isn't available on Linux)
 - **Drag and drop files and images** — drop a photo, video, or document straight onto a chat to attach it

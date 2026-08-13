@@ -113,7 +113,14 @@ function makeHarness() {
       observe() {}
     },
     atob: (s) => Buffer.from(s, "base64").toString("binary"),
-    setTimeout,
+    // unref'd, so bridge.js's 60s stream-GC timer cannot hold node open after the
+    // last assertion. The timers still fire — the tests themselves await ref'd
+    // sleeps, which keep the loop alive for as long as anything is being checked.
+    setTimeout: (fn, ms) => {
+      const t = setTimeout(fn, ms);
+      if (t && typeof t.unref === "function") t.unref();
+      return t;
+    },
     clearTimeout,
     setInterval: () => 0,
   };

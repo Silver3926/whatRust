@@ -9,6 +9,8 @@ pub struct Settings {
     pub hotkey_enabled: bool,
     pub hotkey: String,
     pub notifications: bool,
+    /// Display zoom for the WhatsApp webview, 1.0 = the site's own sizing.
+    pub zoom: f64,
 }
 
 impl Default for Settings {
@@ -20,7 +22,33 @@ impl Default for Settings {
             hotkey_enabled: true,
             hotkey: "CmdOrCtrl+Shift+W".to_string(),
             notifications: true,
+            zoom: 1.0,
         }
+    }
+}
+
+/// Zoom bounds. The settings UI only offers four presets inside this range; the
+/// clamp exists so a hand-edited settings.json cannot leave the app at a zoom
+/// level from which the settings window is unreadable.
+pub const ZOOM_MIN: f64 = 0.5;
+pub const ZOOM_MAX: f64 = 2.0;
+
+/// Bring a zoom factor into range. A non-finite value (a `null` or a string in
+/// the JSON deserialises to the default, but arithmetic in an older build could
+/// still have written a NaN) falls back to 1.0 rather than to a bound.
+pub fn sanitize_zoom(zoom: f64) -> f64 {
+    if zoom.is_finite() {
+        zoom.clamp(ZOOM_MIN, ZOOM_MAX)
+    } else {
+        1.0
+    }
+}
+
+impl Settings {
+    /// Repair values an older or hand-edited settings.json can carry.
+    pub fn sanitized(mut self) -> Self {
+        self.zoom = sanitize_zoom(self.zoom);
+        self
     }
 }
 
@@ -37,7 +65,8 @@ pub fn load(app: &AppHandle) -> Settings {
     settings_path(app)
         .ok()
         .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
+        .and_then(|s| serde_json::from_str::<Settings>(&s).ok())
+        .map(Settings::sanitized)
         .unwrap_or_default()
 }
 
@@ -52,6 +81,10 @@ pub fn save(app: &AppHandle, s: &Settings) -> tauri::Result<()> {
 /// shortcut registration error as `Some(msg)` if registering failed; `None` if it
 /// registered successfully, or the shortcut is disabled/empty, or on non-desktop.
 pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
+    // Zoom is a webview property, so it applies on every platform and takes
+    // effect on the open account windows without a reload.
+    crate::window::apply_zoom_all(app, s.zoom);
+
     #[cfg(desktop)]
     {
         use tauri_plugin_autostart::ManagerExt;
@@ -82,7 +115,7 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::Settings;
+    use super::{sanitize_zoom, Settings, ZOOM_MAX, ZOOM_MIN};
 
     #[test]
     fn defaults_are_sane() {
@@ -91,6 +124,36 @@ mod tests {
         assert!(s.notifications);
         assert_eq!(s.hotkey, "CmdOrCtrl+Shift+W");
         assert!(!s.autostart);
+        assert_eq!(s.zoom, 1.0);
+    }
+
+    #[test]
+    fn zoom_presets_survive_sanitizing() {
+        for z in [0.75, 0.85, 1.0, 1.15] {
+            assert_eq!(sanitize_zoom(z), z);
+        }
+    }
+
+    #[test]
+    fn out_of_range_zoom_is_clamped() {
+        assert_eq!(sanitize_zoom(0.01), ZOOM_MIN);
+        assert_eq!(sanitize_zoom(9.0), ZOOM_MAX);
+        assert_eq!(sanitize_zoom(-1.0), ZOOM_MIN);
+    }
+
+    #[test]
+    fn non_finite_zoom_falls_back_to_unscaled() {
+        assert_eq!(sanitize_zoom(f64::NAN), 1.0);
+        assert_eq!(sanitize_zoom(f64::INFINITY), 1.0);
+    }
+
+    #[test]
+    fn zoom_from_json_is_sanitized() {
+        let s: Settings = serde_json::from_str(r#"{"zoom": 12}"#).unwrap();
+        assert_eq!(s.sanitized().zoom, ZOOM_MAX);
+        // Absent in a settings.json written by an older build.
+        let s: Settings = serde_json::from_str(r#"{"autostart": true}"#).unwrap();
+        assert_eq!(s.sanitized().zoom, 1.0);
     }
 
     #[test]

@@ -1,5 +1,15 @@
 const invoke = window.__TAURI__.core.invoke;
 const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled"];
+const ZOOM_DEFAULT = 1;
+
+// settings.json holds a zoom factor, not a preset name, so a stored value need
+// not be one of the four options offered here — it can come from a hand edit or
+// from a build with a different set of presets. Show the closest one.
+function selectNearestZoom(value) {
+  const sel = document.getElementById("zoom");
+  const distance = (o) => Math.abs(parseFloat(o.value) - value);
+  sel.value = [...sel.options].reduce((a, b) => (distance(b) < distance(a) ? b : a)).value;
+}
 
 async function load() {
   const s = await invoke("get_settings");
@@ -8,6 +18,7 @@ async function load() {
     if (el) el.checked = !!s[f];
   }
   document.getElementById("hotkey").value = s.hotkey || "CmdOrCtrl+Shift+W";
+  selectNearestZoom(Number.isFinite(s.zoom) ? s.zoom : ZOOM_DEFAULT);
 }
 
 async function save() {
@@ -18,6 +29,7 @@ async function save() {
   }
   const hk = document.getElementById("hotkey").value.trim();
   s.hotkey = hk || "CmdOrCtrl+Shift+W";
+  s.zoom = parseFloat(document.getElementById("zoom").value) || ZOOM_DEFAULT;
   const note = document.getElementById("note");
   try {
     const warn = await invoke("set_settings", { settings: s });
@@ -152,6 +164,9 @@ window.addEventListener("DOMContentLoaded", () => {
     if (e.key === "Enter") addAccount();
   });
   document.getElementById("record_hotkey").addEventListener("click", toggleRecording);
+  // Zoom saves on change rather than on Save: picking a size you cannot see the
+  // effect of is guesswork, and the webview applies it immediately.
+  document.getElementById("zoom").addEventListener("change", save);
 });
 
 // --- App lock ---

@@ -55,9 +55,10 @@ async function init() {
 
   document.getElementById("reset").addEventListener("click", async (e) => {
     e.preventDefault();
-    const ok = confirm(
-      "Reset whatRust?\n\nThis logs out ALL accounts and removes the app lock. " +
-      "You will need to re-scan the WhatsApp QR code. Your chats stay on your phone."
+    const ok = await Dlg.confirm(
+      "This logs out ALL accounts and removes the app lock. You will need to " +
+      "re-scan the WhatsApp QR code. Your chats stay on your phone.",
+      { title: "Reset whatRust?", okLabel: "Reset", danger: true }
     );
     if (!ok) return;
     try {

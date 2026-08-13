@@ -21,8 +21,23 @@ use tauri::{
     AppHandle, Manager,
 };
 
+// macOS menu-bar items are expected to be *template* images: a monochrome
+// silhouette that AppKit tints for the current appearance (black on a light menu
+// bar, white on a dark one). Our green app mark is the one thing up there that
+// doesn't follow the system, so macOS gets its own pair of assets — generated
+// from the same app-icon.svg by `scripts/make-tray-template.mjs`. Windows and
+// Linux tray areas have no such convention and keep the colour icon.
+#[cfg(target_os = "macos")]
+const ICON_NORMAL: &[u8] = include_bytes!("../icons/tray-macos-template.png");
+#[cfg(target_os = "macos")]
+const ICON_UNREAD: &[u8] = include_bytes!("../icons/tray-macos-template-unread.png");
+#[cfg(not(target_os = "macos"))]
 const ICON_NORMAL: &[u8] = include_bytes!("../icons/tray.png");
+#[cfg(not(target_os = "macos"))]
 const ICON_UNREAD: &[u8] = include_bytes!("../icons/tray-unread.png");
+
+/// `NSImage.isTemplate` is macOS-only; the flag is ignored elsewhere.
+const ICON_IS_TEMPLATE: bool = cfg!(target_os = "macos");
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     // Placeholder menu; rebuild_menu fills in the per-account items at startup.
@@ -30,6 +45,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id("main-tray")
         .icon(Image::from_bytes(ICON_NORMAL)?)
+        .icon_as_template(ICON_IS_TEMPLATE)
         .tooltip("WhatsApp")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -154,14 +170,16 @@ pub fn update_badge(app: &AppHandle, count: u32) {
             let _ = tray.set_title(None::<String>);
             let _ = tray.set_tooltip(Some("WhatsApp"));
             if let Ok(icon) = Image::from_bytes(ICON_NORMAL) {
-                let _ = tray.set_icon(Some(icon));
+                // Set image + template flag atomically: on macOS a set_icon followed
+                // by set_icon_as_template renders the icon twice and visibly flickers.
+                let _ = tray.set_icon_with_as_template(Some(icon), ICON_IS_TEMPLATE);
             }
         }
         BadgeState::Count(c) => {
             let _ = tray.set_title(Some(c.to_string()));
             let _ = tray.set_tooltip(Some(format!("{c} unread — WhatsApp")));
             if let Ok(icon) = Image::from_bytes(ICON_UNREAD) {
-                let _ = tray.set_icon(Some(icon));
+                let _ = tray.set_icon_with_as_template(Some(icon), ICON_IS_TEMPLATE);
             }
         }
     }

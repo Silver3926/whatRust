@@ -168,10 +168,10 @@ pub fn apply_zoom_all(app: &AppHandle, zoom: f64) {
 /// the page-side decode is asynchronous and doesn't block the UI — the old 100 MB
 /// ceiling existed for the synchronous-eval transport.
 const MAX_DROP_FILE_BYTES: u64 = 500 * 1024 * 1024; // 500 MB
-/// Aggregate raw-byte budget for ONE drop. Files are individually capped, but the
-/// page holds every accepted file of a batch in memory at once — without a batch
-/// budget, 200 near-cap files still meant many GiB in flight.
-const MAX_DROP_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
+/// Aggregate raw-byte budget for ONE drop. The page must hold the accepted File data
+/// and WhatsApp may copy it again; keeping the batch at one maximum-size file avoids
+/// the multi-GiB peak caused by several 500 MB files in one commit.
+const MAX_DROP_TOTAL_BYTES: u64 = 500 * 1024 * 1024; // 500 MB
 /// Cap how many files one drop can inject, counted over files that actually pass
 /// the checks (a folder or an oversized file does not use up a slot).
 const MAX_DROP_FILES: usize = 200;
@@ -189,17 +189,39 @@ const CHUNKS_PER_EVAL: usize = 2;
 /// On Linux the webview never delivers the drop into the page DOM, so Tauri's
 /// drag-drop handler (kept enabled in the builder) is our only source of the dropped
 /// paths — and because that handler consumes the drop on every platform, Windows and
-/// macOS drops arrive here too. Files are read off the UI thread and streamed to the
-/// page-side `__whatrustDropFeed` (bridge.js) as begin/chunk/end messages keyed by a
+/// macOS drops arrive here too. A dedicated FIFO worker per account window reads and
+/// streams drops off the UI thread in OS event order, so a later small drop cannot
+/// commit before an earlier large one. Messages reach the page-side
+/// `__whatrustDropFeed` (bridge.js) as begin/chunk/end operations keyed by a
 /// process-unique drop id, then committed; bridge.js rebuilds the `File`s and hands
 /// them to WhatsApp's own attach flow. The commit runs through `eval_with_callback`,
 /// so "the page actually executed the handler" is confirmed instead of assumed, and
 /// every skipped file is surfaced to the user as a toast (not just a log line).
+fn run_drop_queue<F>(rx: std::sync::mpsc::Receiver<(u64, Vec<std::path::PathBuf>)>, mut handle: F)
+where
+    F: FnMut(u64, &[std::path::PathBuf]),
+{
+    while let Ok((drop_id, paths)) = rx.recv() {
+        handle(drop_id, &paths);
+    }
+}
+
 fn register_drop_handler(win: &WebviewWindow) {
     use std::sync::atomic::{AtomicU64, Ordering};
     // Process-wide drop id: lets the page key concurrent streams from several
     // windows/drops without guessing by file name or content.
     static DROP_SEQ: AtomicU64 = AtomicU64::new(1);
+    // One worker per webview is deliberate: independent threads can finish out of
+    // order, allowing a later small drop to overtake an earlier large drop. The event
+    // callback only enqueues paths, so it stays non-blocking while FIFO order is exact.
+    let (drop_tx, drop_rx) = std::sync::mpsc::channel();
+    let worker_win = win.clone();
+    std::thread::spawn(move || {
+        run_drop_queue(drop_rx, |drop_id, paths| {
+            stream_drop(&worker_win, drop_id, paths)
+        });
+    });
+
     let win = win.clone();
     win.clone().on_window_event(move |event| {
         let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, position }) = event
@@ -224,10 +246,16 @@ fn register_drop_handler(win: &WebviewWindow) {
             );
             return;
         }
-        let paths = paths.clone();
-        let w = win.clone();
-        // Read + stream off the UI thread: a large video would otherwise stall the window.
-        std::thread::spawn(move || stream_drop(&w, drop_id, &paths));
+        if drop_tx.send((drop_id, paths.clone())).is_err() {
+            crate::dlog::log(&format!(
+                "dragdrop: drop #{drop_id}: per-window worker unavailable"
+            ));
+            crate::notify::show(
+                win.app_handle(),
+                "Files not attached",
+                "The drop worker was unavailable. Please try again.",
+            );
+        }
     });
 }
 
@@ -333,7 +361,7 @@ fn summarize_skips(s: &DropSkips) -> String {
     }
     if s.over_budget > 0 {
         parts.push(format!(
-            "{} {} over the 2 GB per-drop total",
+            "{} {} over the 500 MB per-drop total",
             s.over_budget,
             plural(s.over_budget)
         ));
@@ -413,6 +441,12 @@ fn drop_msg_commit(drop_id: u64, files: usize) -> String {
     format!(
         "window.__whatrustDropFeed?window.__whatrustDropFeed({{op:\"commit\",drop:{drop_id},files:{files}}}):\"NOHANDLER\""
     )
+}
+
+fn drop_ack_failed(ack: &str) -> bool {
+    ["NOHANDLER", "EMPTY", "ERR"]
+        .iter()
+        .any(|marker| ack.contains(marker))
 }
 
 /// Read exactly `expected` bytes from `r`, emitting batches of base64 stanzas. Each
@@ -584,9 +618,9 @@ fn stream_drop(w: &WebviewWindow, drop_id: u64, paths: &[std::path::PathBuf]) {
             let ack = ack.trim().to_string();
             crate::dlog::log(&format!("dragdrop: drop #{drop_id} commit ack: {ack}"));
             // NOHANDLER: bridge.js isn't loaded (page mid-navigation). EMPTY: the
-            // page received no complete file (chunks lost). Both mean nothing
-            // attached — say so instead of leaving the user staring at nothing.
-            if ack.contains("NOHANDLER") || ack.contains("EMPTY") {
+            // page received no complete file (chunks lost). ERR: incremental decode
+            // failed before attachment. Every case means nothing attached.
+            if drop_ack_failed(&ack) {
                 crate::notify::show(
                     &app,
                     "Files not attached",
@@ -1044,11 +1078,35 @@ pub fn open_settings_window(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        base64_encode, drop_msg_begin, drop_msg_chunk_prefix_parts, drop_msg_commit, drop_msg_end,
-        ensure_download_destination, mime_for, plan_drop, stream_chunks, summarize_skips,
-        toggle_decision, DropSkips, StreamAbort, ToggleAct, CHROME_UA, CHUNKS_PER_EVAL,
-        DROP_CHUNK_BYTES, DROP_MSG_CHUNK_SUFFIX_PARTS, MAX_DROP_FILES,
+        base64_encode, drop_ack_failed, drop_msg_begin, drop_msg_chunk_prefix_parts,
+        drop_msg_commit, drop_msg_end, ensure_download_destination, mime_for, plan_drop,
+        run_drop_queue, stream_chunks, summarize_skips, toggle_decision, DropSkips, StreamAbort,
+        ToggleAct, CHROME_UA, CHUNKS_PER_EVAL, DROP_CHUNK_BYTES, DROP_MSG_CHUNK_SUFFIX_PARTS,
+        MAX_DROP_FILES,
     };
+
+    #[test]
+    fn per_window_drop_worker_preserves_os_event_order() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send((41, vec![std::path::PathBuf::from("first-large.mp4")]))
+            .unwrap();
+        tx.send((42, vec![std::path::PathBuf::from("second-small.mp4")]))
+            .unwrap();
+        drop(tx);
+
+        let mut seen = Vec::new();
+        run_drop_queue(rx, |drop_id, paths| {
+            seen.push((drop_id, paths[0].clone()));
+        });
+
+        assert_eq!(
+            seen,
+            vec![
+                (41, std::path::PathBuf::from("first-large.mp4")),
+                (42, std::path::PathBuf::from("second-small.mp4")),
+            ]
+        );
+    }
 
     #[test]
     fn chrome_ua_and_bridge_client_hints_agree_on_the_version() {
@@ -1146,8 +1204,15 @@ mod tests {
             2,
             3,
             48 * 1024 + 1,
+            DROP_CHUNK_BYTES - 1,
             DROP_CHUNK_BYTES,
             DROP_CHUNK_BYTES + 1,
+            DROP_CHUNK_BYTES + 2,
+            2 * DROP_CHUNK_BYTES + 1,
+            4 * DROP_CHUNK_BYTES - 1,
+            4 * DROP_CHUNK_BYTES,
+            4 * DROP_CHUNK_BYTES + 1,
+            5 * DROP_CHUNK_BYTES + 2,
         ] {
             let data: Vec<u8> = (0..len)
                 .map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8)
@@ -1215,25 +1280,22 @@ mod tests {
     #[test]
     fn plan_drop_enforces_the_aggregate_budget() {
         use std::io::Write;
-        // Sparse files sized to cross the 2 GB batch budget: five 400 MB files (each
-        // under the 500 MB per-file cap) = 2.0 GB fits exactly; a 6th overflows. Use a
-        // dir on the real data disk (cargo target's parent) — tmpfs-backed /tmp can
-        // report metadata().len() as 0 for a set_len'd sparse file, which plan_drop reads
-        // as unreadable and yields 0 planned files instead of exercising the budget.
+        // Three sparse 200 MB files cross the 500 MB batch budget: the first two
+        // fit (400 MB total), while the third is skipped. Use a real-data directory
+        // where possible — some tmpfs setups report set_len'd sparse metadata oddly.
         let dir = std::env::var("CARGO_TARGET_TMPDIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::env::temp_dir());
         std::fs::create_dir_all(&dir).unwrap();
         let mut paths = Vec::new();
-        for i in 0..5 {
+        for i in 0..3 {
             let p = dir.join(format!(
                 "whatrust_test_{}_budget_{i}.bin",
                 std::process::id()
             ));
             let f = std::fs::File::create(&p).unwrap();
-            f.set_len(400 * 1024 * 1024).unwrap();
+            f.set_len(200 * 1024 * 1024).unwrap();
             drop(f);
-            // touch so metadata is fresh
             std::fs::OpenOptions::new()
                 .append(true)
                 .open(&p)
@@ -1242,23 +1304,14 @@ mod tests {
                 .unwrap();
             paths.push(p);
         }
-        // 2.0 GB fits; add a 6th to cross 2 GB.
-        let extra = dir.join(format!(
-            "whatrust_test_{}_budget_extra.bin",
-            std::process::id()
-        ));
-        let f = std::fs::File::create(&extra).unwrap();
-        f.set_len(400 * 1024 * 1024).unwrap();
-        drop(f);
-        paths.push(extra.clone());
         let (planned, skips) = plan_drop(&paths);
         for p in &paths {
             let _ = std::fs::remove_file(p);
         }
-        assert_eq!(planned.len(), 5, "five 400 MB files fit the 2 GB budget");
+        assert_eq!(planned.len(), 2, "two 200 MB files fit the 500 MB budget");
         assert_eq!(
             skips.over_budget, 1,
-            "the 6th file exceeds the batch budget"
+            "the third file exceeds the batch budget"
         );
     }
 
@@ -1280,6 +1333,14 @@ mod tests {
         let commit = drop_msg_commit(7, 3);
         assert!(commit.contains("?window.__whatrustDropFeed("));
         assert!(commit.ends_with(":\"NOHANDLER\""));
+    }
+
+    #[test]
+    fn commit_ack_failures_include_page_decode_errors() {
+        for ack in ["\"NOHANDLER\"", "\"EMPTY\"", "\"ERR\""] {
+            assert!(drop_ack_failed(ack), "{ack}");
+        }
+        assert!(!drop_ack_failed("\"QUEUED:2\""));
     }
 
     #[test]

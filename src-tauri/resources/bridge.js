@@ -234,8 +234,10 @@
   //    Chunks arrive BATCHED ({op:"chunk", parts:[b64,b64,...]}) because a
   //    synchronous WebKit eval handler that decodes every chunk inline would freeze
   //    the page's main thread for the whole transfer. Base64 stanzas are queued raw
-  //    (no work per arrival) and decoded to bytes off the main thread in a chunked,
-  //    yielding pump — the webview stays interactive while a big file streams in.
+  //    (no work inside the eval handler), then decoded incrementally between incoming
+  //    batches by a yielding main-thread pump. Each stanza decode is non-preemptible,
+  //    but the pump yields between stanzas so WhatsApp keeps handling events and the
+  //    page does not retain the whole drop as base64 until commit.
   //    Batched transport also means ~4x fewer eval round-trips than one eval per chunk.
   //
   //    WhatsApp Web keeps a sticker-creator <input type=file> (image-only accept) ALWAYS
@@ -293,6 +295,11 @@
       return new Promise(function (resolve, reject) {
         (function step() {
           try {
+            if (f.aborted) {
+              f.b64s.length = 0;
+              resolve();
+              return;
+            }
             var b64s = f.b64s;
             var budget = 12; // ~one animation frame before yielding
             var t0 = Date.now();
@@ -307,6 +314,38 @@
             reject(e);
           }
         })();
+      });
+    };
+    // Start a deferred pump as soon as chunks arrive. The handler itself still returns
+    // immediately, but base64 strings are released throughout the native stream instead
+    // of all being retained until commit. Errors are stored for commit/drain to surface;
+    // the background promise always settles cleanly (no unhandled rejection).
+    drop.startPump = function (f) {
+      if (f.error || f.aborted || f.pumpPromise || !f.b64s.length) {
+        return f.pumpPromise || Promise.resolve();
+      }
+      f.pumpPromise = new Promise(function (resolve) {
+        setTimeout(resolve, 0);
+      }).then(function () {
+        return drop.pump(f);
+      }).catch(function (e) {
+        f.error = e;
+        f.b64s.length = 0;
+        f.parts.length = 0;
+        f.got = 0;
+      }).then(function () {
+        f.pumpPromise = null;
+        if (!f.error && !f.aborted && f.b64s.length) return drop.startPump(f);
+      });
+      return f.pumpPromise;
+    };
+    // Wait for any in-flight incremental pump and drain a final tail that arrived just
+    // before commit. Reject only here so the queued drop job can notify the user once.
+    drop.drain = function (f) {
+      if (f.error) return Promise.reject(f.error);
+      return drop.startPump(f).then(function () {
+        if (f.error) throw f.error;
+        if (f.pumpPromise || f.b64s.length) return drop.drain(f);
       });
     };
     drop.dataTransfer = function (files) {
@@ -461,7 +500,8 @@
       return st;
     };
 
-    // Serialized injection queue: one drop's composer at a time.
+    // Serialized injection queue: one drop's composer at a time. Rust's per-window
+    // FIFO stream worker guarantees commits reach this queue in original OS event order.
     drop.queue = Promise.resolve();
     drop.runQueued = function (job) {
       drop.queue = drop.queue.then(job, job);
@@ -514,17 +554,20 @@
             parts: [], // decoded Uint8Array chunks
             got: 0,
             done: false,
+            aborted: false,
+            error: null,
+            pumpPromise: null,
           };
           return "OK";
         }
         var f = st.files[msg.file];
         if (msg.op === "chunk") {
           if (!f || f.done) return "NOFILE";
-          // Rust sends chunks batched: parts is an array of standalone-base64 stanzas.
-          // Queue them raw (no decode work here — this handler runs synchronously inside
-          // the eval and must return fast so the next eval isn't blocked).
+          // Queue raw stanzas and schedule decode after this synchronous eval handler
+          // returns. Decoding then proceeds incrementally while Rust streams later batches.
           var ps = msg.parts || (msg.b64 ? [msg.b64] : []);
           for (var i = 0; i < ps.length; i++) f.b64s.push(ps[i]);
+          drop.startPump(f);
           return "OK";
         }
         if (msg.op === "end") {
@@ -532,6 +575,11 @@
           return "OK";
         }
         if (msg.op === "abort") {
+          if (f) {
+            f.aborted = true;
+            f.b64s.length = 0;
+            f.parts.length = 0;
+          }
           delete st.files[msg.file];
           drop.log("drop #" + st.id + " file " + msg.file + " aborted by sender");
           return "OK";
@@ -540,29 +588,36 @@
           if (st.gc) clearTimeout(st.gc);
           delete drop.pending[st.id];
           var entries = Object.keys(st.files).map(function (k) { return st.files[k]; });
-          // Validate completeness without decoding: stanza lengths and terminal padding
-          // reveal the exact decoded byte count. This preserves the old, useful
-          // QUEUED:n / EMPTY ack while keeping expensive base64 decode asynchronous.
+          var hadDecodeError = false;
+          // Decoded bytes plus still-queued stanza lengths reveal the exact received size
+          // without waiting for the incremental pump to finish.
           var valid = entries.filter(function (e) {
-            var queued = e.b64s.reduce(function (n, b64) {
+            if (e.error) {
+              hadDecodeError = true;
+              drop.log("drop #" + st.id + " decode failed before commit: " + e.error);
+              return false;
+            }
+            var received = e.got + e.b64s.reduce(function (n, b64) {
               return n + drop.b64DecodedSize(b64);
             }, 0);
-            if (!e.done || queued !== e.size) {
-              drop.log("drop #" + st.id + " file incomplete (" + queued + "/" + e.size + "), skipped");
+            if (!e.done || received !== e.size) {
+              drop.log("drop #" + st.id + " file incomplete (" + received + "/" + e.size + "), skipped");
               return false;
             }
             return true;
           });
-          if (valid.length === 0) return "EMPTY";
-          // Reserve this drop's position in the global queue immediately. Decoding is
-          // part of the queued job, so a quick second drop cannot finish decoding and
-          // overtake a larger first drop. This also bounds page-side decode/memory work
-          // to one committed drop at a time.
+          if (valid.length === 0) return hadDecodeError ? "ERR" : "EMPTY";
+          // A pure error returns ERR for Rust to notify. When healthy files remain,
+          // commit must still return QUEUED:n, so notify the partial failure here.
+          if (hadDecodeError) drop.attachFailed();
+          // Reserve the already-arrival-ordered commit in the composer queue. The native
+          // FIFO worker prevents a later small drop from committing first; this queue
+          // separately prevents two attachment composers from fighting each other.
           drop.runQueued(function () {
             var files = [];
             return valid.reduce(function (p, e) {
               return p.then(function () {
-                return drop.pump(e).then(function () {
+                return drop.drain(e).then(function () {
                   if (e.got !== e.size) {
                     drop.log("drop #" + st.id + " decode size mismatch (" + e.got + "/" + e.size + "), skipped");
                     return;
@@ -594,6 +649,6 @@
         return "ERR";
       }
     };
-    drop.log("drop injector v4 (batched chunks, async decode pump, no-loss routing) ready");
+    drop.log("drop injector v5 (batched chunks, incremental decode, ordered no-loss routing) ready");
   } catch (e) {}
 })();

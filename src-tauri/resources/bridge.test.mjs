@@ -113,6 +113,7 @@ function makeHarness(options = {}) {
     console: { log: (m) => logs.push(String(m)), error() {} },
     File: FakeFile,
     DataTransfer: FakeDataTransfer,
+    Uint8Array: options.Uint8Array || Uint8Array,
     Event: class {
       constructor(type) {
         this.type = type;
@@ -210,6 +211,47 @@ async function testChunkReassemblyByteExact() {
   assert(file && file.bytes().equals(content), "bytes identical after reassembly");
 }
 
+async function testFromBase64FastPath() {
+  console.log("modern WebViews use Uint8Array.fromBase64 without the atob fallback");
+  let fastDecodes = 0;
+  class FastUint8Array extends Uint8Array {}
+  FastUint8Array.fromBase64 = (s) => {
+    fastDecodes++;
+    return Uint8Array.from(Buffer.from(s, "base64"));
+  };
+  const { window: w, mediaInput } = makeHarness({
+    Uint8Array: FastUint8Array,
+    atob: () => { throw new Error("atob fallback must not run"); },
+  });
+  const content = Buffer.from("native-fast-path");
+  feedFile(w, 13, 0, "fast.mp4", "video/mp4", content, { chunks: 3 });
+  const ack = w.__whatrustDropFeed({ op: "commit", drop: 13, files: 1 });
+  assert(ack === "QUEUED:1", `fast-path stream queued (got ${ack})`);
+  await sleep(30);
+  const file = mediaInput.batches[0]?.[0];
+  assert(fastDecodes === 3, `fromBase64 decoded all three stanzas (got ${fastDecodes})`);
+  assert(file?.bytes().equals(content), "fast-path bytes reassemble exactly");
+}
+
+async function testChunksDecodeBeforeCommit() {
+  console.log("base64 stanzas decode incrementally before commit");
+  let decodes = 0;
+  const { window: w, mediaInput } = makeHarness({
+    atob: (s) => {
+      decodes++;
+      return Buffer.from(s, "base64").toString("binary");
+    },
+  });
+  feedFile(w, 11, 0, "streaming.mp4", "video/mp4", "twelve-bytes", { chunks: 3 });
+  await sleep(30);
+  assert(decodes === 3, `all three stanzas decoded before commit (got ${decodes})`);
+  assert(mediaInput.batches.length === 0, "decoding alone does not inject a file");
+  const ack = w.__whatrustDropFeed({ op: "commit", drop: 11, files: 1 });
+  assert(ack === "QUEUED:1", `decoded stream still validates at commit (got ${ack})`);
+  await sleep(30);
+  assert(mediaInput.batches[0]?.[0]?.name === "streaming.mp4", "decoded file injects after commit");
+}
+
 async function testIncompleteFileSkippedAbortHonored() {
   console.log("incomplete/aborted streams never produce a corrupt File");
   const { window: w, mediaInput, docInput } = makeHarness();
@@ -228,15 +270,15 @@ async function testIncompleteFileSkippedAbortHonored() {
   assert(JSON.stringify(all) === JSON.stringify(["good.pdf"]), `only good.pdf attached (got ${all})`);
 }
 
-async function testSequentialDropsBothSurvive() {
-  console.log("a small second drop cannot overtake a slower first drop");
+async function testCommittedDropsInjectSequentially() {
+  console.log("committed drops use one composer in queue order");
   const slowPart = b64("one");
   let delayed = false;
   const { window: w, mediaInput } = makeHarness({
     atob: (s) => {
       // Make the first stanza exceed the 12 ms pump budget while another stanza
-      // remains, forcing its decode to yield. The second drop then decodes quickly;
-      // queue reservation at commit time must still preserve arrival order.
+      // remains, forcing its decode to yield. The second committed job then decodes
+      // quickly; the composer queue must still preserve commit order.
       if (!delayed && s === slowPart) {
         delayed = true;
         const until = Date.now() + 20;
@@ -266,6 +308,22 @@ async function testCommitWithoutDataAcksEmpty() {
   const { window: w } = makeHarness();
   const ack = w.__whatrustDropFeed({ op: "commit", drop: 8, files: 0 });
   assert(ack === "EMPTY", `empty commit acks EMPTY (got ${ack})`);
+}
+
+async function testDecodeFailureBeforeCommitAcksErr() {
+  console.log("a pre-commit decode failure is delegated to Rust exactly once");
+  const { window: w, mediaInput, invocations } = makeHarness({
+    atob: () => { throw new Error("forced early decode failure"); },
+  });
+  feedFile(w, 12, 0, "broken-early.mp4", "video/mp4", "bytes");
+  await sleep(30);
+  const ack = w.__whatrustDropFeed({ op: "commit", drop: 12, files: 1 });
+  assert(ack === "ERR", `pre-commit failure acks ERR for Rust (got ${ack})`);
+  assert(mediaInput.batches.length === 0, "failed decode is never injected");
+  assert(
+    !invocations.some((x) => x.cmd === "notify"),
+    "JavaScript does not duplicate the Rust-side ERR notification"
+  );
 }
 
 async function testDecodeFailureNotifies() {
@@ -301,9 +359,12 @@ const tests = [
   testPureMediaGoesToMediaInput,
   testDistinctSameNamedFilesBothAttach,
   testChunkReassemblyByteExact,
+  testFromBase64FastPath,
+  testChunksDecodeBeforeCommit,
   testIncompleteFileSkippedAbortHonored,
-  testSequentialDropsBothSurvive,
+  testCommittedDropsInjectSequentially,
   testCommitWithoutDataAcksEmpty,
+  testDecodeFailureBeforeCommitAcksErr,
   testDecodeFailureNotifies,
   testMalformedMessagesAreRejected,
 ];

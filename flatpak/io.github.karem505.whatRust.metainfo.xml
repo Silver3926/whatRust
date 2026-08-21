@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 Karem -->
+<component type="desktop-application">
+  <id>io.github.karem505.whatRust</id>
+  <name>whatRust</name>
+  <summary>Lightweight unofficial WhatsApp Web client</summary>
+
+  <developer id="io.github.karem505">
+    <name>Karem</name>
+  </developer>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <url type="homepage">https://github.com/karem505/whatRust</url>
+  <url type="vcs-browser">https://github.com/karem505/whatRust</url>
+  <url type="bugtracker">https://github.com/karem505/whatRust/issues</url>
+  <url type="faq">https://github.com/karem505/whatRust#faq</url>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#25D366</color>
+    <color type="primary" scheme_preference="dark">#128C7E</color>
+  </branding>
+
+  <description>
+    <p>
+      whatRust is an unofficial, independent desktop client that loads the official
+      WhatsApp Web interface in the system WebKitGTK webview. It is not affiliated
+      with, endorsed by, or sponsored by WhatsApp or Meta.
+    </p>
+    <p>It adds desktop features beyond a browser tab:</p>
+    <ul>
+      <li>Multiple isolated WhatsApp accounts in separate windows</li>
+      <li>Native notifications, system tray integration, and close to tray</li>
+      <li>Drag-and-drop attachment routing with bounded memory use</li>
+      <li>Optional password lock and automatic idle locking</li>
+      <li>Persistent sessions, display scaling, and configurable shortcuts</li>
+    </ul>
+    <p>
+      Voice messages work on Linux. Voice and video calls normally do not because
+      mainstream Linux WebKitGTK runtimes are built without compatible WebRTC support.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.karem505.whatRust.desktop</launchable>
+
+  <requires>
+    <internet>always</internet>
+    <display_length compare="ge">600</display_length>
+  </requires>
+
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+
+  <screenshots>
+    <screenshot type="default">
+      <image>https://github.com/karem505/whatRust/releases/download/v0.6.2/settings.png</image>
+      <caption>Manage accounts, desktop preferences, shortcuts, and app lock</caption>
+    </screenshot>
+  </screenshots>
+
+  <releases>
+    <release type="stable" version="0.6.3" date="2026-08-21">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.3</url>
+      <description>
+        <p>Adds native Flatpak packaging and sandbox-aware single-instance and autostart integration.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.2" date="2026-08-21">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.2</url>
+      <description>
+        <p>Improves drag-and-drop ordering, responsiveness, decoding, and memory bounds.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.1" date="2026-08-21">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.1</url>
+      <description>
+        <p>Adds responsive large-file drag and drop across desktop platforms.</p>
+      </description>
+    </release>
+  </releases>
+
+  <content_rating type="oars-1.1"/>
+</component>

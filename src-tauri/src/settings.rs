@@ -55,6 +55,59 @@ impl Settings {
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
+#[cfg(target_os = "linux")]
+fn is_valid_flatpak_id(id: &str) -> bool {
+    id.len() <= 255
+        && id.split('.').count() >= 3
+        && id.split('.').all(|part| {
+            let mut chars = part.chars();
+            chars
+                .next()
+                .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn flatpak_id() -> Option<String> {
+    std::env::var("FLATPAK_ID")
+        .ok()
+        .filter(|id| is_valid_flatpak_id(id))
+}
+
+#[cfg(target_os = "linux")]
+fn flatpak_autostart_entry(flatpak_id: &str) -> String {
+    format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Version=1.0\n\
+         Name=whatRust\n\
+         Comment=Start whatRust minimized\n\
+         Exec=flatpak run --command=whatrust {flatpak_id} --minimized\n\
+         Icon={flatpak_id}\n\
+         Terminal=false\n\
+         X-GNOME-Autostart-enabled=true\n\
+         X-Flatpak={flatpak_id}\n"
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn apply_flatpak_autostart(flatpak_id: &str, enabled: bool) -> std::io::Result<()> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is not set"))?;
+    let dir = home.join(".config/autostart");
+    let path = dir.join(format!("{flatpak_id}.desktop"));
+    if enabled {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(path, flatpak_autostart_entry(flatpak_id))
+    } else if path.exists() {
+        std::fs::remove_file(path)
+    } else {
+        Ok(())
+    }
+}
+
 fn settings_path(app: &AppHandle) -> tauri::Result<PathBuf> {
     let dir = app.path().app_config_dir()?;
     std::fs::create_dir_all(&dir)?;
@@ -77,9 +130,9 @@ pub fn save(app: &AppHandle, s: &Settings) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Apply side effects of settings (autostart + global shortcut). Returns the global-
-/// shortcut registration error as `Some(msg)` if registering failed; `None` if it
-/// registered successfully, or the shortcut is disabled/empty, or on non-desktop.
+/// Apply side effects of settings (autostart + global shortcut). Returns any
+/// non-fatal side-effect failures as one warning string; persisted settings and
+/// zoom changes are still applied.
 pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
     // Zoom is a webview property, so it applies on every platform and takes
     // effect on the open account windows without a reload.
@@ -87,24 +140,46 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
 
     #[cfg(desktop)]
     {
-        use tauri_plugin_autostart::ManagerExt;
-        let autostart = app.autolaunch();
-        if s.autostart {
-            let _ = autostart.enable();
-        } else {
-            let _ = autostart.disable();
+        let mut warnings = Vec::new();
+
+        #[cfg(target_os = "linux")]
+        let flatpak_autostart_handled = flatpak_id()
+            .map(|id| {
+                if let Err(e) = apply_flatpak_autostart(&id, s.autostart) {
+                    warnings.push(format!("autostart could not be updated: {e}"));
+                }
+                true
+            })
+            .unwrap_or(false);
+        #[cfg(not(target_os = "linux"))]
+        let flatpak_autostart_handled = false;
+
+        if !flatpak_autostart_handled {
+            use tauri_plugin_autostart::ManagerExt;
+            let autostart = app.autolaunch();
+            let result = if s.autostart {
+                autostart.enable()
+            } else {
+                autostart.disable()
+            };
+            if let Err(e) = result {
+                warnings.push(format!("autostart could not be updated: {e}"));
+            }
         }
 
         use tauri_plugin_global_shortcut::GlobalShortcutExt;
         let gs = app.global_shortcut();
         let _ = gs.unregister_all();
         if s.hotkey_enabled && !s.hotkey.trim().is_empty() {
-            return match gs.register(s.hotkey.as_str()) {
-                Ok(_) => None,
-                Err(e) => Some(e.to_string()),
-            };
+            if let Err(e) = gs.register(s.hotkey.as_str()) {
+                warnings.push(format!("shortcut not registered (it may be in use): {e}"));
+            }
         }
-        None
+        if warnings.is_empty() {
+            None
+        } else {
+            Some(warnings.join("; "))
+        }
     }
     #[cfg(not(desktop))]
     {
@@ -116,6 +191,31 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{sanitize_zoom, Settings, ZOOM_MAX, ZOOM_MIN};
+
+    #[cfg(target_os = "linux")]
+    use super::{flatpak_autostart_entry, is_valid_flatpak_id};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn flatpak_id_validation_blocks_path_and_desktop_entry_injection() {
+        assert!(is_valid_flatpak_id("io.github.karem505.whatRust"));
+        assert!(!is_valid_flatpak_id("../../autostart"));
+        assert!(!is_valid_flatpak_id("io.github.karem505.whatRust\nExec=sh"));
+        assert!(!is_valid_flatpak_id("io..whatRust"));
+        assert!(!is_valid_flatpak_id("io.github.505whatRust"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn flatpak_autostart_entry_reenters_the_sandbox() {
+        let entry = flatpak_autostart_entry("io.github.karem505.whatRust");
+        assert!(entry.contains(
+            "Exec=flatpak run --command=whatrust io.github.karem505.whatRust --minimized"
+        ));
+        assert!(entry.contains("Icon=io.github.karem505.whatRust"));
+        assert!(entry.contains("X-Flatpak=io.github.karem505.whatRust"));
+        assert!(!entry.contains("Exec=/app/bin/whatrust"));
+    }
 
     #[test]
     fn defaults_are_sane() {

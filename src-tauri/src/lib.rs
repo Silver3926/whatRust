@@ -35,19 +35,29 @@ pub fn run() {
     // single-instance MUST be registered first.
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            // `whatrust --toggle` (bind it to an OS keyboard shortcut — the reliable
-            // global-hotkey path on Wayland, where in-process X11 grabs don't fire)
-            // toggles the active window. Otherwise a 2nd launch raises it, except an
-            // autostart relaunch carrying --minimized (stay hidden in the tray).
-            // Both toggle_active and show_main defer to the lock screen when locked,
-            // so neither can bypass the app lock.
-            if args.iter().any(|a| a == "--toggle") {
-                window::toggle_active(app);
-            } else if !args.iter().any(|a| a == "--minimized") {
-                window::show_main(app);
-            }
-        }));
+        let mut single_instance = tauri_plugin_single_instance::Builder::<tauri::Wry>::new()
+            .callback(|app, args, _cwd| {
+                // `whatrust --toggle` (bind it to an OS keyboard shortcut — the reliable
+                // global-hotkey path on Wayland, where in-process X11 grabs don't fire)
+                // toggles the active window. Otherwise a 2nd launch raises it, except an
+                // autostart relaunch carrying --minimized (stay hidden in the tray).
+                // Both toggle_active and show_main defer to the lock screen when locked,
+                // so neither can bypass the app lock.
+                if args.iter().any(|a| a == "--toggle") {
+                    window::toggle_active(app);
+                } else if !args.iter().any(|a| a == "--minimized") {
+                    window::show_main(app);
+                }
+            });
+
+        // Flatpak only permits a sandbox to own D-Bus names under its exported
+        // application ID. Native packages keep using the stable Tauri identifier.
+        #[cfg(target_os = "linux")]
+        if let Some(id) = settings::flatpak_id() {
+            single_instance = single_instance.dbus_id(id);
+        }
+
+        builder = builder.plugin(single_instance.build());
     }
 
     builder = builder.plugin(tauri_plugin_notification::init());

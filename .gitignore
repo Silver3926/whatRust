@@ -9,3 +9,9 @@ dist/
 
 # Tauri generated
 /src-tauri/gen/
+
+# Flatpak generated
+/.flatpak-builder/
+/builddir/
+/repo/
+/*.flatpak

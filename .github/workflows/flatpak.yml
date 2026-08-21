@@ -1,0 +1,27 @@
+name: flatpak
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-flatpak:
+    name: Flatpak (x86_64)
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-48
+      options: --privileged
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@401fe28a8384095fc1531b9d320b292f0ee45adb # v6.7
+        with:
+          bundle: whatRust_x86_64.flatpak
+          manifest-path: flatpak/io.github.karem505.whatRust.yml
+          branch: stable
+          cache-key: whatrust-flatpak-${{ github.sha }}
+          arch: x86_64
+          verbose: true

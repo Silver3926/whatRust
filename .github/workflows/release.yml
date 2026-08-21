@@ -41,5 +41,52 @@ jobs:
           # named after the branch).
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseName: ${{ github.ref_type == 'tag' && format('whatRust {0}', github.ref_name) || '' }}
-          releaseDraft: false
+          releaseDraft: ${{ github.ref_type == 'tag' }}
           prerelease: false
+
+  flatpak:
+    name: Flatpak (${{ matrix.variant.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.variant.runner }}
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-48
+      options: --privileged
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@401fe28a8384095fc1531b9d320b292f0ee45adb # v6.7
+        with:
+          bundle: whatRust_${{ matrix.variant.arch }}.flatpak
+          manifest-path: flatpak/io.github.karem505.whatRust.yml
+          branch: stable
+          cache-key: whatrust-flatpak-${{ matrix.variant.arch }}-${{ github.sha }}
+          arch: ${{ matrix.variant.arch }}
+          verbose: true
+
+  publish-flatpak:
+    name: Attach Flatpaks to release
+    if: github.ref_type == 'tag'
+    needs: [build, flatpak]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: whatRust_*-*.flatpak
+          path: flatpak-assets
+          merge-multiple: true
+      - name: Upload Flatpak bundles and publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" flatpak-assets/*.flatpak --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest

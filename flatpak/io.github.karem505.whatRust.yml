@@ -1,0 +1,65 @@
+id: io.github.karem505.whatRust
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: whatrust
+
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --filesystem=home:ro
+  - --filesystem=xdg-download
+  - --filesystem=xdg-config/autostart:create
+  - --filesystem=xdg-run/tray-icon:create
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --talk-name=org.freedesktop.ScreenSaver
+  - --talk-name=org.gnome.ScreenSaver
+  - --talk-name=org.kde.ScreenSaver
+  - --env=WEBKIT_DISABLE_DMABUF_RENDERER=1
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+
+modules:
+  - shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json
+
+  - name: whatrust
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_HOME: /run/build/whatrust/cargo
+        CARGO_NET_OFFLINE: 'true'
+        TAURI_CONFIG: '{"identifier":"io.github.karem505.whatRust"}'
+    sources:
+      - type: dir
+        path: ../src-tauri
+        dest: src-tauri
+        skip:
+          - target
+      - type: dir
+        path: ../settings-ui
+        dest: settings-ui
+      - type: file
+        path: ../LICENSE
+      - cargo-sources.json
+      - type: file
+        path: io.github.karem505.whatRust.desktop
+      - type: file
+        path: io.github.karem505.whatRust.metainfo.xml
+      - type: file
+        path: io.github.karem505.whatRust.svg
+    build-commands:
+      - cargo --offline fetch --locked --manifest-path src-tauri/Cargo.toml
+      - cargo --offline build --release --locked --manifest-path src-tauri/Cargo.toml
+      - install -Dm755 src-tauri/target/release/whatrust /app/bin/whatrust
+      - install -Dm644 io.github.karem505.whatRust.desktop /app/share/applications/io.github.karem505.whatRust.desktop
+      - install -Dm644 io.github.karem505.whatRust.metainfo.xml /app/share/metainfo/io.github.karem505.whatRust.metainfo.xml
+      - install -Dm644 io.github.karem505.whatRust.svg /app/share/icons/hicolor/scalable/apps/io.github.karem505.whatRust.svg
+      - install -Dm644 LICENSE /app/share/licenses/io.github.karem505.whatRust/LICENSE

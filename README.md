@@ -80,7 +80,7 @@ OS supports it — before showing your chats. Enable it under **Settings → Sec
 - **Password** works on every platform (Argon2id, stored locally).
 - **Biometric** is an optional shortcut: Windows Hello on Windows, Touch ID on any Mac
   that has it, and the system fingerprint dialog on Linux where polkit/`pam_fprintd` is
-  configured (native `.deb` install only; the AppImage falls back to the password).
+  configured (native `.deb` install only; AppImage and Flatpak use the password).
 - Lock **on launch**, **on demand** (tray → *Lock now*), **when hidden to the tray**, or
   **after an idle timeout** — each toggleable in Settings.
 - Forgot your password? **Reset** from the lock screen logs out all accounts and clears
@@ -123,7 +123,15 @@ OS supports it — before showing your chats. Enable it under **Settings → Sec
 
 ## Installation
 
-**Linux / macOS** — one line:
+**Linux Flatpak (x86_64 or ARM64)** — one line:
+```bash
+curl -fsSL https://raw.githubusercontent.com/karem505/whatRust/master/install-flatpak.sh | sh
+```
+The Flatpak uses the GNOME runtime from Flathub, while the whatRust bundle itself is
+published with each [GitHub release](https://github.com/karem505/whatRust/releases/latest).
+It keeps its own sandboxed WhatsApp login, separate from a `.deb` or AppImage install.
+
+**Linux AppImage / macOS** — one line:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/karem505/whatRust/master/install.sh | sh
 ```
@@ -135,7 +143,7 @@ irm https://raw.githubusercontent.com/karem505/whatRust/master/install.ps1 | iex
 ```
 Downloads and runs the latest NSIS installer (`.exe`); an `.msi` is also available on the release page.
 
-**Manual download** — grab a `.AppImage`/`.deb`, `.dmg`, `.exe`, or `.msi` from the [latest release](https://github.com/karem505/whatRust/releases/latest).
+**Manual download** — grab a `.flatpak`, `.AppImage`/`.deb`, `.dmg`, `.exe`, or `.msi` from the [latest release](https://github.com/karem505/whatRust/releases/latest).
 
 <details>
 <summary><b>Build from source</b> (Rust + Cargo + Tauri CLI)</summary>
@@ -200,7 +208,7 @@ Wayland blocks apps from grabbing global hotkeys, so whatRust's built-in shortcu
 1. **Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts → +** (GNOME; KDE has an equivalent under *Custom Shortcuts*)
 2. Name it `whatRust`, set the command to `whatrust --toggle`, and assign your key (e.g. `Ctrl+Shift+W`).
 
-`whatrust --toggle` shows the window if it's hidden and hides it if it's visible — a true toggle that works on Wayland. (The built-in shortcut still works on X11, Windows, and macOS.)
+`whatrust --toggle` shows the window if it's hidden and hides it if it's visible — a true toggle that works on Wayland. For the Flatpak, bind `flatpak run io.github.karem505.whatRust --toggle` instead. (The built-in shortcut still works on X11, Windows, and macOS.)
 
 ### Does whatRust support the system tray and close-to-tray?
 Yes. It adds a system tray icon with an unread-message badge, can close to the tray, and forwards new messages to native OS notifications.
@@ -219,6 +227,10 @@ whatRust only loads the official `web.whatsapp.com` in a native webview and adds
 - **macOS drag-and-drop from Photos.app** (and other apps that "promise" files rather than providing real paths, e.g. dragging an image straight out of a browser) isn't supported by the system webview layer — whatRust shows a hint instead of silently ignoring the drop. Drag from Finder, or use the attach (+) button.
 - **Drag-and-drop limits**: up to 200 files per drop, 500 MB per file, and 500 MB per drop total. Base64 transport is decoded incrementally while files stream in, but the page must still hold the final `File` data in memory. Larger batches can always be sent via WhatsApp's attach (+) → Document picker, which is not routed through these limits. Skipped files are reported in a notification.
 - **Multiple accounts on macOS** require macOS 14+ (older macOS runs a single account); Linux and Windows are unrestricted.
+- **Flatpak file access**: native drag-and-drop needs read-only access to your home
+  files because Tauri does not yet route OS drops through the File Transfer portal.
+  whatRust writes only to Downloads, its sandbox data, and its optional autostart entry.
+  The wrapped WhatsApp page has no general filesystem API.
 
 ## Contributing
 

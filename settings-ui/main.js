@@ -34,7 +34,7 @@ async function save() {
   try {
     const warn = await invoke("set_settings", { settings: s });
     if (warn) {
-      note.textContent = "Saved — shortcut not registered (may be in use): " + warn;
+      note.textContent = "Saved with warning: " + warn;
       setTimeout(() => (note.textContent = ""), 6000);
     } else {
       note.textContent = "Saved ✓";

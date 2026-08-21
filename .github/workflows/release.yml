@@ -87,6 +87,7 @@ jobs:
       - name: Upload Flatpak bundles and publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release upload "$GITHUB_REF_NAME" flatpak-assets/*.flatpak --clobber
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest

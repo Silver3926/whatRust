@@ -2,8 +2,6 @@ id: io.github.karem505.whatRust
 runtime: org.gnome.Platform
 runtime-version: '50'
 sdk: org.gnome.Sdk
-sdk-extensions:
-  - org.freedesktop.Sdk.Extension.rust-stable
 command: whatrust
 
 finish-args:
@@ -24,11 +22,8 @@ finish-args:
   - --talk-name=org.kde.ScreenSaver
   - --env=WEBKIT_DISABLE_DMABUF_RENDERER=1
 
-build-options:
-  append-path: /usr/lib/sdk/rust-stable/bin
-
 modules:
-  - shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json
+  - flatpak/shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json
 
   - name: whatrust
     buildsystem: simple
@@ -36,26 +31,42 @@ modules:
       env:
         CARGO_HOME: /run/build/whatrust/cargo
         CARGO_NET_OFFLINE: 'true'
+        PATH: /run/build/whatrust/rust/bin:/usr/bin
         TAURI_CONFIG: '{"identifier":"io.github.karem505.whatRust"}'
     sources:
+      - type: archive
+        url: https://static.rust-lang.org/dist/2025-08-07/rust-1.89.0-x86_64-unknown-linux-gnu.tar.xz
+        sha256: c4f2796b10ee886001f0799bc40caea38746403a33c379d77878c4f4683f9b51
+        dest: rust-toolchain
+        strip-components: 1
+        only-arches:
+          - x86_64
+      - type: archive
+        url: https://static.rust-lang.org/dist/2025-08-07/rust-1.89.0-aarch64-unknown-linux-gnu.tar.xz
+        sha256: ae6f35b027cb32339fa4ac94dab37a21194e9a5c680491d01e54aa61e9da4de7
+        dest: rust-toolchain
+        strip-components: 1
+        only-arches:
+          - aarch64
       - type: dir
-        path: ../src-tauri
+        path: src-tauri
         dest: src-tauri
         skip:
           - target
       - type: dir
-        path: ../settings-ui
+        path: settings-ui
         dest: settings-ui
       - type: file
-        path: ../LICENSE
-      - cargo-sources.json
+        path: LICENSE
+      - flatpak/cargo-sources.json
       - type: file
-        path: io.github.karem505.whatRust.desktop
+        path: flatpak/io.github.karem505.whatRust.desktop
       - type: file
-        path: io.github.karem505.whatRust.metainfo.xml
+        path: flatpak/io.github.karem505.whatRust.metainfo.xml
       - type: file
-        path: io.github.karem505.whatRust.svg
+        path: flatpak/io.github.karem505.whatRust.svg
     build-commands:
+      - ./rust-toolchain/install.sh --prefix=/run/build/whatrust/rust --without=rust-docs --disable-ldconfig
       - cargo --offline fetch --locked --manifest-path src-tauri/Cargo.toml
       - cargo --offline build --release --locked --manifest-path src-tauri/Cargo.toml
       - install -Dm755 src-tauri/target/release/whatrust /app/bin/whatrust

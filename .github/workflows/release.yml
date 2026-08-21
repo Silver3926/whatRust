@@ -65,7 +65,7 @@ jobs:
       - uses: flatpak/flatpak-github-actions/flatpak-builder@401fe28a8384095fc1531b9d320b292f0ee45adb # v6.7
         with:
           bundle: whatRust_${{ matrix.variant.arch }}.flatpak
-          manifest-path: flatpak/io.github.karem505.whatRust.yml
+          manifest-path: io.github.karem505.whatRust.yml
           branch: stable
           cache-key: whatrust-flatpak-${{ matrix.variant.arch }}-${{ github.sha }}
           arch: ${{ matrix.variant.arch }}

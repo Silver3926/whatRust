@@ -22,14 +22,24 @@ case "$(uname -m)" in
     ;;
 esac
 
-TMP="$(mktemp "${TMPDIR:-/tmp}/whatrust-flatpak.XXXXXX")"
-trap 'rm -f "$TMP"' EXIT HUP INT TERM
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/whatrust-flatpak.XXXXXX")"
+TMP="$TMP_DIR/whatRust_${ARCH}.flatpak"
+cleanup() {
+  rm -f "$TMP"
+  rmdir "$TMP_DIR" 2>/dev/null || :
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 flatpak remote-add --if-not-exists --user flathub \
   https://dl.flathub.org/repo/flathub.flatpakrepo
 curl -fL --retry 3 --progress-bar \
   "$BASE_URL/whatRust_${ARCH}.flatpak" -o "$TMP"
-flatpak install --user --or-update -y "$TMP"
+if flatpak info --user "$APP_ID" >/dev/null 2>&1; then
+  flatpak install --user --reinstall -y "$TMP"
+else
+  flatpak install --user -y "$TMP"
+fi
 
 printf '%s\n' "whatRust is installed. Launch it from your application menu or run:"
 printf '  flatpak run %s\n' "$APP_ID"

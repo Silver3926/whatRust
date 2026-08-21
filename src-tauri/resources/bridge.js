@@ -231,10 +231,12 @@
   //    (Tauri's drop handler consumes it), so Rust captures the drop (window.rs
   //    `register_drop_handler`) and STREAMS the file bytes here through
   //    `__whatrustDropFeed` as begin/chunk/end/commit messages keyed by a drop id.
-  //    Chunked transport (vs the old single giant eval) keeps peak memory at one
-  //    ~5.6 MB base64 chunk per step and stays far below WebView2's cross-process
-  //    message ceiling; each chunk is standalone base64 (Rust emits multiple-of-3
-  //    byte chunks) decoded to bytes on arrival.
+  //    Chunks arrive BATCHED ({op:"chunk", parts:[b64,b64,...]}) because a
+  //    synchronous WebKit eval handler that decodes every chunk inline would freeze
+  //    the page's main thread for the whole transfer. Base64 stanzas are queued raw
+  //    (no work per arrival) and decoded to bytes off the main thread in a chunked,
+  //    yielding pump — the webview stays interactive while a big file streams in.
+  //    Batched transport also means ~4x fewer eval round-trips than one eval per chunk.
   //
   //    WhatsApp Web keeps a sticker-creator <input type=file> (image-only accept) ALWAYS
   //    mounted, but mounts the real "Photos & videos" input (accept includes video) and
@@ -259,12 +261,53 @@
       try { console.log("[whatRust drop] " + m); } catch (e) {}
       try { invoke("dlog", { msg: String(m).slice(0, 280) }); } catch (e) {}
     };
+    drop.attachFailed = function () {
+      nativeNotify("whatRust", "Could not attach dropped files. Use the attach (+) button and try again.");
+    };
+    // Decode one base64 stanza to bytes. Modern WebKit (18.4+) has
+    // Uint8Array.fromBase64 — ~10x faster than atob + a char loop on multi-MB
+    // stanzas, and allocates the Uint8Array natively in one pass. Fall back to atob
+    // on older engines (Windows/macOS webviews are current; Linux WebKitGTK ≥ 2.46
+    // is WebKit 18.x, so fromBase64 is present in practice).
     drop.b64ToBytes = function (b64) {
-      var bin = atob(b64),
-        n = bin.length,
-        u = new Uint8Array(n);
+      if (typeof Uint8Array.fromBase64 === "function") {
+        return Uint8Array.fromBase64(b64);
+      }
+      var bin = atob(b64), n = bin.length, u = new Uint8Array(n);
       for (var i = 0; i < n; i++) u[i] = bin.charCodeAt(i);
       return u;
+    };
+    // Compute a stanza's decoded length without decoding it. This keeps commit's
+    // acknowledgement synchronous and cheap while still detecting a missing chunk.
+    drop.b64DecodedSize = function (b64) {
+      var n = String(b64 || "").length;
+      if (!n) return 0;
+      var pad = b64.slice(-2) === "==" ? 2 : (b64.slice(-1) === "=" ? 1 : 0);
+      return Math.floor(n / 4) * 3 - pad;
+    };
+    // Pump queued base64 stanzas -> Uint8Array parts, a few at a time, yielding to
+    // the main thread between stanzas so the page (and WhatsApp's own JS) keeps
+    // handling events while a big drop streams in. Returns a promise; the queue is
+    // empty when it resolves and f.got matches the bytes decoded.
+    drop.pump = function (f) {
+      return new Promise(function (resolve, reject) {
+        (function step() {
+          try {
+            var b64s = f.b64s;
+            var budget = 12; // ~one animation frame before yielding
+            var t0 = Date.now();
+            while (b64s.length && Date.now() - t0 < budget) {
+              var u = drop.b64ToBytes(b64s.shift());
+              f.parts.push(u);
+              f.got += u.length;
+            }
+            if (b64s.length) setTimeout(step, 0);
+            else resolve();
+          } catch (e) {
+            reject(e);
+          }
+        })();
+      });
     };
     drop.dataTransfer = function (files) {
       var dt = new DataTransfer();
@@ -467,7 +510,8 @@
             name: String(msg.name || "file"),
             type: String(msg.type || "application/octet-stream"),
             size: msg.size >>> 0,
-            parts: [],
+            b64s: [], // raw base64 stanzas waiting to be pumped
+            parts: [], // decoded Uint8Array chunks
             got: 0,
             done: false,
           };
@@ -476,9 +520,11 @@
         var f = st.files[msg.file];
         if (msg.op === "chunk") {
           if (!f || f.done) return "NOFILE";
-          var bytes = drop.b64ToBytes(msg.b64 || "");
-          f.parts.push(bytes);
-          f.got += bytes.length;
+          // Rust sends chunks batched: parts is an array of standalone-base64 stanzas.
+          // Queue them raw (no decode work here — this handler runs synchronously inside
+          // the eval and must return fast so the next eval isn't blocked).
+          var ps = msg.parts || (msg.b64 ? [msg.b64] : []);
+          for (var i = 0; i < ps.length; i++) f.b64s.push(ps[i]);
           return "OK";
         }
         if (msg.op === "end") {
@@ -493,23 +539,54 @@
         if (msg.op === "commit") {
           if (st.gc) clearTimeout(st.gc);
           delete drop.pending[st.id];
-          var files = [];
-          for (var k in st.files) {
-            var e = st.files[k];
-            if (!e.done || e.got !== e.size) {
-              drop.log("drop #" + st.id + " file " + k + " incomplete (" + e.got + "/" + e.size + "), skipped");
-              continue;
+          var entries = Object.keys(st.files).map(function (k) { return st.files[k]; });
+          // Validate completeness without decoding: stanza lengths and terminal padding
+          // reveal the exact decoded byte count. This preserves the old, useful
+          // QUEUED:n / EMPTY ack while keeping expensive base64 decode asynchronous.
+          var valid = entries.filter(function (e) {
+            var queued = e.b64s.reduce(function (n, b64) {
+              return n + drop.b64DecodedSize(b64);
+            }, 0);
+            if (!e.done || queued !== e.size) {
+              drop.log("drop #" + st.id + " file incomplete (" + queued + "/" + e.size + "), skipped");
+              return false;
             }
-            files.push(new File(e.parts, e.name, { type: e.type }));
-            e.parts = null; // release chunk references once the File owns the data
-          }
-          if (files.length === 0) return "EMPTY";
+            return true;
+          });
+          if (valid.length === 0) return "EMPTY";
+          // Reserve this drop's position in the global queue immediately. Decoding is
+          // part of the queued job, so a quick second drop cannot finish decoding and
+          // overtake a larger first drop. This also bounds page-side decode/memory work
+          // to one committed drop at a time.
           drop.runQueued(function () {
-            return drop.injectBatch(files).catch(function (e) {
-              drop.log("inject error: " + e);
+            var files = [];
+            return valid.reduce(function (p, e) {
+              return p.then(function () {
+                return drop.pump(e).then(function () {
+                  if (e.got !== e.size) {
+                    drop.log("drop #" + st.id + " decode size mismatch (" + e.got + "/" + e.size + "), skipped");
+                    return;
+                  }
+                  files.push(new File(e.parts, e.name, { type: e.type }));
+                  e.parts = null; // release chunk refs once the File owns the data
+                  e.b64s = null;
+                });
+              });
+            }, Promise.resolve()).then(function () {
+              if (files.length === 0) {
+                drop.log("drop #" + st.id + " had no complete files");
+                return;
+              }
+              return drop.injectBatch(files).catch(function (e) {
+                drop.log("inject error: " + e);
+                drop.attachFailed();
+              });
+            }).catch(function (e) {
+              drop.log("decode error: " + e);
+              drop.attachFailed();
             });
           });
-          return "QUEUED:" + files.length;
+          return "QUEUED:" + valid.length;
         }
         return "BADOP";
       } catch (e) {
@@ -517,6 +594,6 @@
         return "ERR";
       }
     };
-    drop.log("drop injector v3 (chunked, queued, no-loss routing) ready");
+    drop.log("drop injector v4 (batched chunks, async decode pump, no-loss routing) ready");
   } catch (e) {}
 })();

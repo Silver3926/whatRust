@@ -217,7 +217,7 @@ whatRust only loads the official `web.whatsapp.com` in a native webview and adds
 - **Notification click** does not yet focus the window — use the tray icon or the global shortcut.
 - **macOS** builds are unsigned and currently Apple Silicon (arm64) only.
 - **macOS drag-and-drop from Photos.app** (and other apps that "promise" files rather than providing real paths, e.g. dragging an image straight out of a browser) isn't supported by the system webview layer — whatRust shows a hint instead of silently ignoring the drop. Drag from Finder, or use the attach (+) button.
-- **Drag-and-drop limits**: up to 30 files per drop, 100 MB per file, 300 MB per drop total (larger files can always be sent via WhatsApp's attach (+) → Document picker, which is not routed through these limits). Skipped files are reported in a notification.
+- **Drag-and-drop limits**: up to 200 files per drop, 500 MB per file, 2 GB per drop total (larger files can always be sent via WhatsApp's attach (+) → Document picker, which is not routed through these limits). Skipped files are reported in a notification.
 - **Multiple accounts on macOS** require macOS 14+ (older macOS runs a single account); Linux and Windows are unrestricted.
 
 ## Contributing

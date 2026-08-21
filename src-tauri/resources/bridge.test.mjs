@@ -65,10 +65,11 @@ class FakeInput {
   }
 }
 
-function makeHarness() {
+function makeHarness(options = {}) {
   const mediaInput = new FakeInput("image/*,video/mp4,video/3gpp,video/quicktime");
   const docInput = new FakeInput("*");
   const logs = [];
+  const invocations = [];
   // Simulate WhatsApp's composer lifecycle: it opens right after an input change
   // and "the user sends" ~80ms later. This exercises injectBatch's real waits
   // (composer detected, then queue held until it closes) without long timeouts.
@@ -96,6 +97,14 @@ function makeHarness() {
   const window = {
     location: { origin: "https://web.whatsapp.com" },
     addEventListener() {},
+    __TAURI__: {
+      core: {
+        invoke(cmd, args) {
+          invocations.push({ cmd, args });
+          return Promise.resolve();
+        },
+      },
+    },
   };
   const sandboxGlobals = {
     window,
@@ -112,7 +121,7 @@ function makeHarness() {
     MutationObserver: class {
       observe() {}
     },
-    atob: (s) => Buffer.from(s, "base64").toString("binary"),
+    atob: options.atob || ((s) => Buffer.from(s, "base64").toString("binary")),
     // unref'd, so bridge.js's 60s stream-GC timer cannot hold node open after the
     // last assertion. The timers still fire — the tests themselves await ref'd
     // sleeps, which keep the loop alive for as long as anything is being checked.
@@ -128,7 +137,7 @@ function makeHarness() {
   const params = Object.keys(sandboxGlobals);
   const fn = new Function(...params, `"use strict";\n${bridgeSrc}`);
   fn(...params.map((k) => sandboxGlobals[k]));
-  return { window, mediaInput, docInput, logs };
+  return { window, mediaInput, docInput, logs, invocations };
 }
 
 // Drive the feed the way window.rs stream_drop does.
@@ -220,9 +229,25 @@ async function testIncompleteFileSkippedAbortHonored() {
 }
 
 async function testSequentialDropsBothSurvive() {
-  console.log("two back-to-back drops are queued, not overwritten");
-  const { window: w, mediaInput } = makeHarness();
-  feedFile(w, 6, 0, "first.mp4", "video/mp4", "one");
+  console.log("a small second drop cannot overtake a slower first drop");
+  const slowPart = b64("one");
+  let delayed = false;
+  const { window: w, mediaInput } = makeHarness({
+    atob: (s) => {
+      // Make the first stanza exceed the 12 ms pump budget while another stanza
+      // remains, forcing its decode to yield. The second drop then decodes quickly;
+      // queue reservation at commit time must still preserve arrival order.
+      if (!delayed && s === slowPart) {
+        delayed = true;
+        const until = Date.now() + 20;
+        while (Date.now() < until) {}
+      }
+      return Buffer.from(s, "base64").toString("binary");
+    },
+  });
+  w.__whatrustDropFeed({ op: "begin", drop: 6, file: 0, name: "first.mp4", type: "video/mp4", size: 4 });
+  w.__whatrustDropFeed({ op: "chunk", drop: 6, file: 0, parts: [slowPart, b64("!")] });
+  w.__whatrustDropFeed({ op: "end", drop: 6, file: 0 });
   w.__whatrustDropFeed({ op: "commit", drop: 6, files: 1 });
   feedFile(w, 7, 0, "second.mp4", "video/mp4", "two");
   w.__whatrustDropFeed({ op: "commit", drop: 7, files: 1 });
@@ -241,6 +266,22 @@ async function testCommitWithoutDataAcksEmpty() {
   const { window: w } = makeHarness();
   const ack = w.__whatrustDropFeed({ op: "commit", drop: 8, files: 0 });
   assert(ack === "EMPTY", `empty commit acks EMPTY (got ${ack})`);
+}
+
+async function testDecodeFailureNotifies() {
+  console.log("an asynchronous decode failure is visible to the user");
+  const { window: w, mediaInput, invocations } = makeHarness({
+    atob: () => { throw new Error("forced decode failure"); },
+  });
+  feedFile(w, 10, 0, "broken.mp4", "video/mp4", "bytes");
+  const ack = w.__whatrustDropFeed({ op: "commit", drop: 10, files: 1 });
+  assert(ack === "QUEUED:1", `valid stream is accepted into the queue (got ${ack})`);
+  await sleep(30);
+  assert(mediaInput.batches.length === 0, "failed decode is never injected");
+  assert(
+    invocations.some((x) => x.cmd === "notify" && /Could not attach/.test(x.args.body)),
+    "native failure notification is sent"
+  );
 }
 
 async function testMalformedMessagesAreRejected() {
@@ -263,6 +304,7 @@ const tests = [
   testIncompleteFileSkippedAbortHonored,
   testSequentialDropsBothSurvive,
   testCommitWithoutDataAcksEmpty,
+  testDecodeFailureNotifies,
   testMalformedMessagesAreRejected,
 ];
 

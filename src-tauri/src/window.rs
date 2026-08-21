@@ -164,22 +164,25 @@ pub fn apply_zoom_all(app: &AppHandle, zoom: f64) {
 
 /// Largest single dropped file we will inline-inject into the page. The page must
 /// hold the decoded bytes to build the `File`, so keep it bounded; larger files are
-/// skipped (with a user-visible toast) rather than risking an OOM or a long UI stall.
-const MAX_DROP_FILE_BYTES: u64 = 100 * 1024 * 1024;
+/// skipped (with a user-visible toast) rather than risking an OOM. Raised now that
+/// the page-side decode is asynchronous and doesn't block the UI — the old 100 MB
+/// ceiling existed for the synchronous-eval transport.
+const MAX_DROP_FILE_BYTES: u64 = 500 * 1024 * 1024; // 500 MB
 /// Aggregate raw-byte budget for ONE drop. Files are individually capped, but the
 /// page holds every accepted file of a batch in memory at once — without a batch
-/// budget, 30 near-cap files still meant multiple GiB in flight.
-const MAX_DROP_TOTAL_BYTES: u64 = 300 * 1024 * 1024;
+/// budget, 200 near-cap files still meant many GiB in flight.
+const MAX_DROP_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
 /// Cap how many files one drop can inject, counted over files that actually pass
 /// the checks (a folder or an oversized file does not use up a slot).
-const MAX_DROP_FILES: usize = 30;
-/// Raw bytes per streamed chunk eval. A multiple of 3, so every non-final chunk
-/// base64-encodes standalone without padding and the page can decode chunks
-/// independently. ~4 MiB raw ≈ 5.6 MiB base64 per eval — far below WebView2's
-/// cross-process message ceiling (the old single-eval transport marshaled a
-/// 100 MiB file as ~266 MiB of UTF-16 in one ExecuteScript and could die
-/// silently), and it keeps peak memory at one chunk instead of one file.
-const DROP_CHUNK_BYTES: usize = 85 * 48 * 1024; // 4_177_920, multiple of 3
+const MAX_DROP_FILES: usize = 200;
+/// Raw bytes per base64 stanza. MUST be a multiple of 3 so every non-final stanza
+/// base64-encodes standalone without interior padding (padding mid-stream breaks the
+/// parity oracle and corrupts the file). 8 MiB rounded down to a multiple of 3.
+const DROP_CHUNK_BYTES: usize = 8 * 1024 * 1024 - ((8 * 1024 * 1024) % 3); // 8_388_606
+/// Two ~8 MiB stanzas become ~21.3 MiB of ASCII JS source (~42.7 MiB as UTF-16),
+/// keeping each eval well below Chromium/WebView2's 128 MiB IPC ceiling while still
+/// cutting cross-process eval round-trips roughly 4x versus the old ~4 MiB transport.
+const CHUNKS_PER_EVAL: usize = 2;
 
 /// Capture OS file drops and inject them into WhatsApp Web.
 ///
@@ -323,21 +326,21 @@ fn summarize_skips(s: &DropSkips) -> String {
     let plural = |n: usize| if n == 1 { "file" } else { "files" };
     if s.too_large > 0 {
         parts.push(format!(
-            "{} {} over the 100 MB size limit",
+            "{} {} over the 500 MB size limit",
             s.too_large,
             plural(s.too_large)
         ));
     }
     if s.over_budget > 0 {
         parts.push(format!(
-            "{} {} over the 300 MB per-drop total",
+            "{} {} over the 2 GB per-drop total",
             s.over_budget,
             plural(s.over_budget)
         ));
     }
     if s.over_count > 0 {
         parts.push(format!(
-            "{} {} over the 30-file limit",
+            "{} {} over the 200-file limit",
             s.over_count,
             plural(s.over_count)
         ));
@@ -386,13 +389,11 @@ fn drop_msg_begin(drop_id: u64, idx: usize, name: &str, mime: &str, len: u64) ->
     )
 }
 
-fn drop_msg_chunk_prefix(drop_id: u64, idx: usize) -> String {
-    format!(
-        "window.__whatrustDropFeed&&window.__whatrustDropFeed({{op:\"chunk\",drop:{drop_id},file:{idx},b64:\""
-    )
+fn drop_msg_chunk_prefix_parts(drop_id: u64, idx: usize) -> String {
+    format!("window.__whatrustDropFeed&&window.__whatrustDropFeed({{op:\"chunk\",drop:{drop_id},file:{idx},parts:[")
 }
 
-const DROP_MSG_CHUNK_SUFFIX: &str = "\"});";
+const DROP_MSG_CHUNK_SUFFIX_PARTS: &str = "]});";
 
 fn drop_msg_end(drop_id: u64, idx: usize) -> String {
     format!(
@@ -414,19 +415,21 @@ fn drop_msg_commit(drop_id: u64, files: usize) -> String {
     )
 }
 
-/// Read exactly `expected` bytes from `r`, emitting standalone base64 chunks of
-/// [`DROP_CHUNK_BYTES`] raw bytes each (final chunk shorter, padded). Returns
-/// [`StreamAbort::Changed`] if the stream ends early or still has data past
-/// `expected` — the size was validated at plan time, so a mismatch means the file
-/// was modified in between and its snapshot cannot be trusted.
+/// Read exactly `expected` bytes from `r`, emitting batches of base64 stanzas. Each
+/// stanza is [`DROP_CHUNK_BYTES`] raw bytes (final one shorter, padded), so each
+/// base64-encodes standalone; the callback receives a Vec of stanzas so the caller
+/// can join them into one eval. Returns [`StreamAbort::Changed`] if the stream ends
+/// early or still has data past `expected` — the size was validated at plan time, so
+/// a mismatch means the file was modified in between and its snapshot cannot be trusted.
 fn stream_chunks<R: std::io::Read>(
     r: &mut R,
     expected: u64,
-    mut emit: impl FnMut(&str) -> Result<(), StreamAbort>,
+    mut emit: impl FnMut(Vec<String>) -> Result<(), StreamAbort>,
 ) -> Result<(), StreamAbort> {
     let mut buf = [0u8; 48 * 1024];
     let mut chunk: Vec<u8> = Vec::with_capacity(DROP_CHUNK_BYTES.min(expected as usize + 2));
     let mut b64 = String::new();
+    let mut batch: Vec<String> = Vec::with_capacity(CHUNKS_PER_EVAL);
     let mut total: u64 = 0;
     loop {
         let want = std::cmp::min(buf.len() as u64, expected - total) as usize;
@@ -439,21 +442,33 @@ fn stream_chunks<R: std::io::Read>(
         }
         total += n as u64;
         chunk.extend_from_slice(&buf[..n]);
-        while chunk.len() >= DROP_CHUNK_BYTES {
+        while chunk.len() > DROP_CHUNK_BYTES {
             b64.clear();
             base64_encode_into(&mut b64, &chunk[..DROP_CHUNK_BYTES]);
-            emit(&b64)?;
+            batch.push(std::mem::take(&mut b64));
             chunk.drain(..DROP_CHUNK_BYTES);
+            if batch.len() == CHUNKS_PER_EVAL {
+                emit(std::mem::take(&mut batch))?;
+            }
         }
     }
     // One extra read probes for growth past the planned size.
     if r.read(&mut buf[..1]).map_err(StreamAbort::Io)? != 0 {
         return Err(StreamAbort::Changed);
     }
-    if !chunk.is_empty() || expected == 0 {
+    // Flush a trailing partial stanza (< DROP_CHUNK_BYTES) only if the last stanza
+    // wasn't exactly at a boundary; an exact-boundary remainder would be a 1-byte
+    // (or empty) padded stanza that breaks the parity oracle and sends a corrupt file.
+    if !chunk.is_empty() {
         b64.clear();
         base64_encode_into(&mut b64, &chunk);
-        emit(&b64)?;
+        batch.push(std::mem::take(&mut b64));
+    } else if expected == 0 {
+        // Zero-length file: emit one empty stanza so the page still gets an end marker.
+        batch.push(String::new());
+    }
+    if !batch.is_empty() {
+        emit(batch)?;
     }
     Ok(())
 }
@@ -474,12 +489,24 @@ fn stream_one_file(
     }
     w.eval(drop_msg_begin(drop_id, idx, &f.name, f.mime, len))
         .map_err(StreamAbort::Eval)?;
-    let prefix = drop_msg_chunk_prefix(drop_id, idx);
-    let result = stream_chunks(&mut file, len, |b64| {
-        let mut js = String::with_capacity(prefix.len() + b64.len() + DROP_MSG_CHUNK_SUFFIX.len());
+    let prefix = drop_msg_chunk_prefix_parts(drop_id, idx);
+    let result = stream_chunks(&mut file, len, |stanzas| {
+        // Build one JS source string per batch: the parts array as quoted base64 stanzas.
+        let mut js = String::with_capacity(
+            prefix.len()
+                + stanzas.iter().map(|s| s.len() + 3).sum::<usize>()
+                + DROP_MSG_CHUNK_SUFFIX_PARTS.len(),
+        );
         js.push_str(&prefix);
-        js.push_str(b64); // base64 alphabet needs no JS-string escaping
-        js.push_str(DROP_MSG_CHUNK_SUFFIX);
+        for (i, s) in stanzas.iter().enumerate() {
+            if i > 0 {
+                js.push(',');
+            }
+            js.push('"');
+            js.push_str(s); // base64 alphabet needs no JS-string escaping
+            js.push('"');
+        }
+        js.push_str(DROP_MSG_CHUNK_SUFFIX_PARTS);
         w.eval(js).map_err(StreamAbort::Eval)
     });
     match result {
@@ -499,6 +526,19 @@ fn stream_one_file(
 /// Plan, stream, and commit one OS drop, then surface the outcome to the user.
 fn stream_drop(w: &WebviewWindow, drop_id: u64, paths: &[std::path::PathBuf]) {
     let (planned, mut skips) = plan_drop(paths);
+    let planned_total: u64 = planned.iter().map(|f| f.len).sum();
+    // For big drops (which now legitimately happen with the raised caps) the old silent
+    // multi-second transfer is indistinguishable from a hang. Tell the user up front so a
+    // 500 MB video reads as "in progress" rather than "dead window". The skip-summary toast
+    // at the end already covers partial failures.
+    if planned_total > 32 * 1024 * 1024 {
+        let (count, mb) = (planned.len(), planned_total as f64 / (1024.0 * 1024.0));
+        crate::notify::show(
+            w.app_handle(),
+            "Attaching files",
+            &format!("Streaming {count} file(s), {mb:.0} MB — large videos take a moment. The window stays usable."),
+        );
+    }
     let mut streamed = 0usize;
     for (idx, f) in planned.iter().enumerate() {
         match stream_one_file(w, drop_id, idx, f) {
@@ -1004,10 +1044,10 @@ pub fn open_settings_window(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        base64_encode, drop_msg_begin, drop_msg_chunk_prefix, drop_msg_commit, drop_msg_end,
+        base64_encode, drop_msg_begin, drop_msg_chunk_prefix_parts, drop_msg_commit, drop_msg_end,
         ensure_download_destination, mime_for, plan_drop, stream_chunks, summarize_skips,
-        toggle_decision, DropSkips, StreamAbort, ToggleAct, CHROME_UA, DROP_CHUNK_BYTES,
-        DROP_MSG_CHUNK_SUFFIX, MAX_DROP_FILES,
+        toggle_decision, DropSkips, StreamAbort, ToggleAct, CHROME_UA, CHUNKS_PER_EVAL,
+        DROP_CHUNK_BYTES, DROP_MSG_CHUNK_SUFFIX_PARTS, MAX_DROP_FILES,
     };
 
     #[test]
@@ -1096,10 +1136,10 @@ mod tests {
 
     #[test]
     fn stream_chunks_matches_oneshot_encoding() {
-        // Sizes covering: below one chunk (every length-mod-3 case), exactly one
-        // chunk, and just past a chunk boundary — chunk concatenation must equal
-        // the one-shot base64 of the whole input (non-final chunks are unpadded
-        // because DROP_CHUNK_BYTES is a multiple of 3).
+        // Sizes covering: below one stanza (every length-mod-3 case), exactly one
+        // stanza, just past a stanza boundary, and spanning several batches — stanza
+        // concatenation (batches flattened) must equal the one-shot base64 of the whole
+        // input (non-final stanzas are unpadded because DROP_CHUNK_BYTES is a multiple of 3).
         for len in [
             0usize,
             1,
@@ -1108,22 +1148,19 @@ mod tests {
             48 * 1024 + 1,
             DROP_CHUNK_BYTES,
             DROP_CHUNK_BYTES + 1,
-            DROP_CHUNK_BYTES + 2,
         ] {
             let data: Vec<u8> = (0..len)
                 .map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8)
                 .collect();
             let mut got = String::new();
-            let mut chunks = 0usize;
-            stream_chunks(&mut &data[..], len as u64, |b64| {
-                chunks += 1;
-                got.push_str(b64);
+            stream_chunks(&mut &data[..], len as u64, |stanzas| {
+                for s in &stanzas {
+                    got.push_str(s);
+                }
                 Ok(())
             })
             .unwrap_or_else(|_| panic!("stream failed at len={len}"));
             assert_eq!(got, base64_encode(&data), "mismatch at len={len}");
-            let expect_chunks = std::cmp::max(1, len.div_ceil(DROP_CHUNK_BYTES));
-            assert_eq!(chunks, expect_chunks, "chunk count at len={len}");
         }
     }
 
@@ -1132,7 +1169,7 @@ mod tests {
         // The reader enforces the planned size: fewer bytes than promised (file
         // truncated mid-read) or extra bytes past it (file grew) must abort with
         // Changed — the old code silently read to EOF, bypassing the size cap.
-        let data = vec![7u8; 100];
+        let data = [7u8; 100];
         let shrunk = stream_chunks(&mut &data[..], 200, |_| Ok(()));
         assert!(matches!(shrunk, Err(StreamAbort::Changed)), "shrunk file");
         let grown = stream_chunks(&mut &data[..], 50, |_| Ok(()));
@@ -1178,16 +1215,23 @@ mod tests {
     #[test]
     fn plan_drop_enforces_the_aggregate_budget() {
         use std::io::Write;
-        // Three sparse-ish files of 150 MB nominal size would blow the 300 MB batch
-        // budget on the third. Use set_len to avoid writing real gigabytes.
+        // Sparse files sized to cross the 2 GB batch budget: five 400 MB files (each
+        // under the 500 MB per-file cap) = 2.0 GB fits exactly; a 6th overflows. Use a
+        // dir on the real data disk (cargo target's parent) — tmpfs-backed /tmp can
+        // report metadata().len() as 0 for a set_len'd sparse file, which plan_drop reads
+        // as unreadable and yields 0 planned files instead of exercising the budget.
+        let dir = std::env::var("CARGO_TARGET_TMPDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir());
+        std::fs::create_dir_all(&dir).unwrap();
         let mut paths = Vec::new();
-        for i in 0..3 {
-            let p = std::env::temp_dir().join(format!(
+        for i in 0..5 {
+            let p = dir.join(format!(
                 "whatrust_test_{}_budget_{i}.bin",
                 std::process::id()
             ));
             let f = std::fs::File::create(&p).unwrap();
-            f.set_len(90 * 1024 * 1024).unwrap();
+            f.set_len(400 * 1024 * 1024).unwrap();
             drop(f);
             // touch so metadata is fresh
             std::fs::OpenOptions::new()
@@ -1198,23 +1242,23 @@ mod tests {
                 .unwrap();
             paths.push(p);
         }
-        // 90+90+90 = 270 MB fits; add a 4th to cross 300 MB.
-        let extra = std::env::temp_dir().join(format!(
+        // 2.0 GB fits; add a 6th to cross 2 GB.
+        let extra = dir.join(format!(
             "whatrust_test_{}_budget_extra.bin",
             std::process::id()
         ));
         let f = std::fs::File::create(&extra).unwrap();
-        f.set_len(90 * 1024 * 1024).unwrap();
+        f.set_len(400 * 1024 * 1024).unwrap();
         drop(f);
         paths.push(extra.clone());
         let (planned, skips) = plan_drop(&paths);
         for p in &paths {
             let _ = std::fs::remove_file(p);
         }
-        assert_eq!(planned.len(), 3, "first 270 MB fit the 300 MB budget");
+        assert_eq!(planned.len(), 5, "five 400 MB files fit the 2 GB budget");
         assert_eq!(
             skips.over_budget, 1,
-            "the 4th file exceeds the batch budget"
+            "the 6th file exceeds the batch budget"
         );
     }
 
@@ -1227,9 +1271,9 @@ mod tests {
             "name must be JSON-escaped"
         );
         assert!(begin.contains("size:42"));
-        let prefix = drop_msg_chunk_prefix(7, 0);
-        assert!(prefix.ends_with("b64:\""));
-        assert!(DROP_MSG_CHUNK_SUFFIX.starts_with('"'));
+        let prefix = drop_msg_chunk_prefix_parts(7, 0);
+        assert!(prefix.ends_with("parts:["));
+        assert!(DROP_MSG_CHUNK_SUFFIX_PARTS.starts_with(']'));
         assert!(drop_msg_end(7, 0).contains("\"end\""));
         // Commit uses a ternary so a missing handler acks "NOHANDLER" instead of
         // silently evaluating to undefined.
@@ -1239,12 +1283,27 @@ mod tests {
     }
 
     #[test]
+    fn eval_batches_keep_a_cross_platform_ipc_safety_margin() {
+        assert_eq!(
+            DROP_CHUNK_BYTES % 3,
+            0,
+            "non-final base64 stanzas must not pad"
+        );
+        let stanza_b64_chars = DROP_CHUNK_BYTES.div_ceil(3) * 4;
+        let batch_utf16_bytes = stanza_b64_chars * CHUNKS_PER_EVAL * 2;
+        assert!(
+            batch_utf16_bytes < 64 * 1024 * 1024,
+            "eval payload should stay under half WebView2's 128 MiB IPC ceiling"
+        );
+    }
+
+    #[test]
     fn skip_summary_reads_naturally_for_single_reasons() {
         let s = summarize_skips(&DropSkips {
             too_large: 1,
             ..Default::default()
         });
-        assert_eq!(s, "Not attached: 1 file over the 100 MB size limit.");
+        assert_eq!(s, "Not attached: 1 file over the 500 MB size limit.");
     }
 
     #[test]

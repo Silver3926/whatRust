@@ -137,7 +137,233 @@ pub fn open_account_window(
     register_focus_listener(app, &win);
     register_drop_handler(&win);
     enable_webview_media(&win);
+    // Windows: route WhatsApp's call popups into independent top-level windows
+    // instead of WebView2's default popup (owned by this window — it minimizes
+    // together with it — and null-proxied, so WhatsApp shows its "allow
+    // pop-ups" hint).
+    #[cfg(target_os = "windows")]
+    enable_call_popups_windows(&win, account, app);
     Ok(win)
+}
+
+// ---------------------------------------------------------------------------
+// Call popups (Windows).
+//
+// WhatsApp Web opens its voice/video call UI via window.open(). With no host
+// handler for new windows, WebView2 falls back to a DEFAULT POPUP that is an
+// owned window of the account window — minimizing the account window minimizes
+// the call — and hands the page a null WindowProxy, which WhatsApp reads as
+// "pop-ups blocked" and answers with its "Allow pop-ups" hint. We intercept
+// the request: deny WebView2's default popup and open a real Tauri window
+// instead — top-level, independent, sharing the account's session.
+//
+// Known trade-off: window.open() still resolves to null for the page, so
+// WhatsApp's explicit "pop out to new window" action can keep showing its
+// "allow pop-ups" hint. The automatic call window — the one users interact
+// with — becomes a real separate window. The full fix would pre-create a
+// spare CoreWebView2 controller per account and hand it back via SetNewWindow
+// (heavier: standing idle memory per account, and environment options must
+// match wry's exactly).
+// ---------------------------------------------------------------------------
+
+/// Label for an account's call popup window: `wa-<id>-call`.
+#[cfg(any(target_os = "windows", test))]
+fn call_window_label(account_id: &str) -> String {
+    format!("{}-call", accounts::window_label(account_id))
+}
+
+/// Whether a window label belongs to a call popup window (`wa-<id>-call`).
+fn is_call_window_label(label: &str) -> bool {
+    label.starts_with("wa-") && label.ends_with("-call")
+}
+
+/// Which popup URIs may become a window: only HTTPS URLs on `web.whatsapp.com`
+/// (where WhatsApp opens its call popup). Everything else is denied — stricter
+/// than WebView2's default, which opens a popup for any URL the page asks for.
+#[cfg(any(target_os = "windows", test))]
+fn popup_target_url(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("https://web.whatsapp.com/")?;
+    // Defense in depth: no userinfo tricks in the remainder.
+    if rest.contains('@') {
+        return None;
+    }
+    Some(uri.to_string())
+}
+
+/// Open (or focus, if it already exists) the call popup window for `account`.
+///
+/// The label is `wa-<id>-call`. It carries the same Chrome UA, bridge.js,
+/// icon, per-account session isolation, and mic/camera permission setup as the
+/// account window, so the popup shares the WhatsApp login and can actually run
+/// the call. It is deliberately NOT wired to close-to-tray, the drop handler,
+/// or the focus tracker: closing it must never affect the account window, and
+/// focusing it must not change which account window tray actions and
+/// `--toggle` target. The `wa-` prefix also puts it under the same
+/// remote-page command restrictions as the account window (see commands.rs).
+#[cfg(target_os = "windows")]
+fn open_call_window(
+    app: &AppHandle,
+    account: &Account,
+    uri: &str,
+    size: Option<(f64, f64)>,
+) -> tauri::Result<WebviewWindow> {
+    let label = call_window_label(&account.id);
+
+    // Reuse the existing call window if it is already open.
+    if let Some(w) = app.get_webview_window(&label) {
+        // A stale call window must not be reused blindly: if WhatsApp asks to open
+        // a DIFFERENT call URI (a previous call ended and a new one started), the
+        // existing webview is still showing the finished call. Point it at the new
+        // target so the second call actually loads; skip the navigation only when
+        // the window is already on the requested URI. Can't read the current URL?
+        // Navigate anyway — never show a stale call in response to a fresh request.
+        let already_there = w
+            .url()
+            .ok()
+            .map(|u| u.as_str() == uri)
+            .unwrap_or(false);
+        if !already_there {
+            let _ = w.navigate(uri.parse().expect("validated call popup URL"));
+        }
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        return Ok(w);
+    }
+
+    let url = uri.parse().expect("validated call popup URL");
+    let icon = tauri::image::Image::from_bytes(APP_ICON)?;
+    let (w, h) = size.unwrap_or((400.0, 720.0));
+
+    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
+        .title(format!("Call — {}", account.name))
+        .inner_size(w.max(280.0), h.max(480.0))
+        .min_inner_size(280.0, 480.0)
+        .icon(icon)?
+        .user_agent(CHROME_UA)
+        .initialization_script(BRIDGE_JS)
+        // Same file:// guard as the account window: a stray drop must never
+        // navigate the call window away and tear down the session.
+        .on_navigation(|url| url.scheme() != "file")
+        .visible(true);
+
+    // Share the WhatsApp session with the account window (same cookie store),
+    // so the call popup is already logged in.
+    let builder = apply_isolation(builder, account, app);
+    let win = builder.build()?;
+
+    // A new window means a NEW WebView2 controller: the mic/camera auto-allow
+    // handler must be installed on it too, or WhatsApp Web cannot open the
+    // call's media streams.
+    enable_webview_media(&win);
+    apply_zoom(&win, crate::settings::load(app).zoom);
+    Ok(win)
+}
+
+/// Extract the (width, height) a popup requested via its window features, so
+/// the call window opens at the size WhatsApp intended. Best effort: any
+/// failure falls back to the default size.
+#[cfg(target_os = "windows")]
+fn window_features_size(
+    args: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2NewWindowRequestedEventArgs,
+) -> Option<(f64, f64)> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2WindowFeatures;
+
+    unsafe {
+        // webview2-com-sys 0.38 binds WindowFeatures() as a property accessor that
+        // RETURNS the interface (it is not an out-param), so there is no
+        // `&mut Option<...>` to fill in. Width/Height are *mut u32 out-params;
+        // Tauri window sizes are f64, so convert at the end.
+        let features = args.WindowFeatures().ok()?;
+        let mut has_size = windows_core::BOOL::default();
+        features.HasSize(&mut has_size).ok()?;
+        if !has_size.as_bool() {
+            return None;
+        }
+        let (mut width, mut height) = (0u32, 0u32);
+        features.Width(&mut width).ok()?;
+        features.Height(&mut height).ok()?;
+        Some((width as f64, height as f64))
+    }
+}
+
+/// Install the popup handler on one account window's WebView2. Registered once
+/// per account window inside `open_account_window`, right next to the
+/// media/permission setup it complements.
+///
+/// WebView2 fires NewWindowRequested on the UI thread — the same thread Tauri
+/// requires for window creation — so opening the Tauri call window inline is
+/// safe. `SetHandled(true)` is set on EVERY request so WebView2's default
+/// owned popup is never created; controller creation for the new Tauri window
+/// is async and completes after this handler returns, which is fine because
+/// the call window navigates itself to the captured URI.
+#[cfg(target_os = "windows")]
+fn enable_call_popups_windows(win: &WebviewWindow, account: &Account, app: &AppHandle) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2, ICoreWebView2NewWindowRequestedEventArgs,
+    };
+    use webview2_com::NewWindowRequestedEventHandler;
+
+    // Clone the OWNED handles before the closures: the COM handler (and the
+    // with_webview closure) must outlive this function and be 'static, so they
+    // may only capture self-owned data — not borrowed &Account/&AppHandle
+    // (borrowing them here caused E0521 "borrowed data escapes"). Account
+    // derives Clone and AppHandle is Clone, so cloning keeps the handler able
+    // to open call windows after this setup function has returned.
+    let app = app.clone();
+    let account = account.clone();
+
+    let _ = win.with_webview(move |webview| {
+        unsafe {
+            let Ok(core) = webview.controller().CoreWebView2() else {
+                return;
+            };
+
+            let handler = NewWindowRequestedEventHandler::create(Box::new(
+                move |_wv: Option<ICoreWebView2>,
+                      args: Option<ICoreWebView2NewWindowRequestedEventArgs>|
+                      -> windows_core::Result<()> {
+                    if let Some(args) = args {
+                        // The URI the page asked to open.
+                        let mut uri = windows_core::PWSTR::null();
+                        args.Uri(&mut uri)?;
+                        let uri = webview2_com::take_pwstr(uri);
+                        // Size the page asked for (best effort).
+                        let size = window_features_size(&args);
+
+                        if let Some(target) = popup_target_url(&uri) {
+                            // WhatsApp call popup: open as an independent window.
+                            if let Err(e) = open_call_window(&app, &account, &target, size) {
+                                crate::dlog::log(&format!("call popup: open failed: {e}"));
+                            }
+                        } else if uri.starts_with("http://") || uri.starts_with("https://") {
+                            // Non-WhatsApp popup (e.g. a target=_blank chat link).
+                            // WebView2's default popup used to serve these; hand
+                            // them to the system browser instead of dropping them.
+                            let _ = std::process::Command::new("explorer").arg(&uri).spawn();
+                        }
+                        // Everything else (custom schemes etc.) is dropped.
+
+                        // Always: suppress WebView2's default popup (the owned,
+                        // null-proxied window that minimizes with the main one).
+                        args.SetHandled(true)?;
+                    }
+                    Ok(())
+                },
+            ));
+            let mut token: i64 = 0;
+            let _ = core.add_NewWindowRequested(&handler, &mut token);
+        }
+    });
+}
+
+/// Whether any call popup window is currently visible. Used to pause the idle
+/// auto-lock: a user mid-call in the popup is idle to mouse and keyboard but
+/// absolutely not away.
+pub fn call_in_progress(app: &AppHandle) -> bool {
+    app.webview_windows()
+        .iter()
+        .any(|(label, w)| is_call_window_label(label) && w.is_visible().unwrap_or(false))
 }
 
 /// Set the display zoom on one account webview.
@@ -996,11 +1222,12 @@ pub fn show_active(app: &AppHandle) {
             return;
         }
     }
-    // Fall back to any account window.
+    // Fall back to any account window (call popup windows are excluded: they are
+    // transient call surfaces, not the chat the user means to reveal).
     if let Some(label) = app
         .webview_windows()
         .keys()
-        .find(|l| l.starts_with("wa-"))
+        .find(|l| l.starts_with("wa-") && !is_call_window_label(l))
         .cloned()
     {
         show_account(app, &label);
@@ -1078,11 +1305,11 @@ pub fn open_settings_window(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        base64_encode, drop_ack_failed, drop_msg_begin, drop_msg_chunk_prefix_parts,
-        drop_msg_commit, drop_msg_end, ensure_download_destination, mime_for, plan_drop,
-        run_drop_queue, stream_chunks, summarize_skips, toggle_decision, DropSkips, StreamAbort,
-        ToggleAct, CHROME_UA, CHUNKS_PER_EVAL, DROP_CHUNK_BYTES, DROP_MSG_CHUNK_SUFFIX_PARTS,
-        MAX_DROP_FILES,
+        base64_encode, call_window_label, drop_ack_failed, drop_msg_begin,
+        drop_msg_chunk_prefix_parts, drop_msg_commit, drop_msg_end, ensure_download_destination,
+        is_call_window_label, mime_for, plan_drop, popup_target_url, run_drop_queue,
+        stream_chunks, summarize_skips, toggle_decision, DropSkips, StreamAbort, ToggleAct,
+        CHROME_UA, CHUNKS_PER_EVAL, DROP_CHUNK_BYTES, DROP_MSG_CHUNK_SUFFIX_PARTS, MAX_DROP_FILES,
     };
 
     #[test]
@@ -1435,5 +1662,32 @@ mod tests {
     #[test]
     fn no_active_window_is_shown() {
         assert_eq!(toggle_decision(None), ToggleAct::Show);
+    }
+
+    #[test]
+    fn call_window_labels_derive_from_the_account() {
+        assert_eq!(call_window_label("default"), "wa-default-call");
+        assert_eq!(call_window_label("acct-2"), "wa-acct-2-call");
+    }
+
+    #[test]
+    fn call_labels_are_recognized_and_others_are_not() {
+        assert!(is_call_window_label("wa-default-call"));
+        assert!(!is_call_window_label("wa-default"));
+        assert!(!is_call_window_label("wa-default-callx"));
+        assert!(!is_call_window_label("settings"));
+    }
+
+    #[test]
+    fn popups_are_limited_to_https_web_whatsapp_com() {
+        assert!(popup_target_url("https://web.whatsapp.com/").is_some());
+        assert!(popup_target_url("https://web.whatsapp.com/v/call/abc").is_some());
+        assert!(popup_target_url("https://web.whatsapp.com/?x=1#/y").is_some());
+        assert!(popup_target_url("http://web.whatsapp.com/").is_none());
+        assert!(popup_target_url("https://evil.com/web.whatsapp.com/").is_none());
+        assert!(popup_target_url("https://web.whatsapp.com.evil.com/").is_none());
+        assert!(popup_target_url("file:///etc/passwd").is_none());
+        assert!(popup_target_url("https://user@web.whatsapp.com/").is_none());
+        assert!(popup_target_url("").is_none());
     }
 }

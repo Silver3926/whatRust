@@ -127,8 +127,7 @@ pub fn run() {
             dlog::init();
 
             // Windows: register our AppUserModelID so WinRT toast notifications
-            // actually render for the installed app (no-op elsewhere). Must run
-            // before any account window can fire a notification. See aumid.rs.
+            // actually render for the installed app (no-op elsewhere). See aumid.rs.
             aumid::register(handle);
 
             let s = settings::load(handle);
@@ -187,7 +186,11 @@ pub fn run() {
                     let idle_ok = user_idle::UserIdle::get_time()
                         .map(|t| t.as_seconds() >= c.idle_secs as u64)
                         .unwrap_or(false);
-                    if idle_ok {
+                    // A visible call popup means the user is mid-call: idle to
+                    // mouse and keyboard, but absolutely not away. Locking here
+                    // would cut them off from their own call (and the separate
+                    // call window makes that scenario far more likely).
+                    if idle_ok && !window::call_in_progress(&idle_handle) {
                         let h = idle_handle.clone();
                         let _ = idle_handle.run_on_main_thread(move || lock::lock_now(&h));
                     }

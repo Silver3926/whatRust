@@ -211,6 +211,20 @@ fn open_call_window(
 
     // Reuse the existing call window if it is already open.
     if let Some(w) = app.get_webview_window(&label) {
+        // A stale call window must not be reused blindly: if WhatsApp asks to open
+        // a DIFFERENT call URI (a previous call ended and a new one started), the
+        // existing webview is still showing the finished call. Point it at the new
+        // target so the second call actually loads; skip the navigation only when
+        // the window is already on the requested URI. Can't read the current URL?
+        // Navigate anyway — never show a stale call in response to a fresh request.
+        let already_there = w
+            .url()
+            .ok()
+            .map(|u| u.as_str() == uri)
+            .unwrap_or(false);
+        if !already_there {
+            let _ = w.navigate(uri.parse().expect("validated call popup URL"));
+        }
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
@@ -256,18 +270,20 @@ fn window_features_size(
     use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2WindowFeatures;
 
     unsafe {
-        let mut features: Option<ICoreWebView2WindowFeatures> = None;
-        args.WindowFeatures(&mut features).ok()?;
-        let features = features?;
+        // webview2-com-sys 0.38 binds WindowFeatures() as a property accessor that
+        // RETURNS the interface (it is not an out-param), so there is no
+        // `&mut Option<...>` to fill in. Width/Height are *mut u32 out-params;
+        // Tauri window sizes are f64, so convert at the end.
+        let features = args.WindowFeatures().ok()?;
         let mut has_size = windows_core::BOOL::default();
         features.HasSize(&mut has_size).ok()?;
         if !has_size.as_bool() {
             return None;
         }
-        let (mut width, mut height) = (0.0f64, 0.0f64);
+        let (mut width, mut height) = (0u32, 0u32);
         features.Width(&mut width).ok()?;
         features.Height(&mut height).ok()?;
-        Some((width, height))
+        Some((width as f64, height as f64))
     }
 }
 
@@ -288,13 +304,20 @@ fn enable_call_popups_windows(win: &WebviewWindow, account: &Account, app: &AppH
     };
     use webview2_com::NewWindowRequestedEventHandler;
 
+    // Clone the OWNED handles before the closures: the COM handler (and the
+    // with_webview closure) must outlive this function and be 'static, so they
+    // may only capture self-owned data — not borrowed &Account/&AppHandle
+    // (borrowing them here caused E0521 "borrowed data escapes"). Account
+    // derives Clone and AppHandle is Clone, so cloning keeps the handler able
+    // to open call windows after this setup function has returned.
+    let app = app.clone();
+    let account = account.clone();
+
     let _ = win.with_webview(move |webview| {
         unsafe {
             let Ok(core) = webview.controller().CoreWebView2() else {
                 return;
             };
-            let app = app.clone();
-            let account = account.clone();
 
             let handler = NewWindowRequestedEventHandler::create(Box::new(
                 move |_wv: Option<ICoreWebView2>,

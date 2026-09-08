@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>whatRust WebView2 Popup Harness</title>
+  <style>
+    :root { color-scheme: light dark; font: 15px system-ui, sans-serif; }
+    body { max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+    button { margin: .25rem .5rem .25rem 0; padding: .55rem .8rem; }
+    code, pre { background: color-mix(in srgb, CanvasText 10%, Canvas); }
+    pre { padding: .8rem; white-space: pre-wrap; min-height: 5rem; }
+    .pass { color: #16803c; }
+    .fail { color: #c62828; }
+  </style>
+</head>
+<body>
+  <h1>WebView2 popup harness</h1>
+  <p>
+    This page is deliberately independent of WhatsApp. It exercises the page-side
+    contract that the call-popup integration must satisfy: <code>window.open()</code>
+    must return a usable WindowProxy when the host supplies a replacement window.
+  </p>
+
+  <p>
+    The host can set <code>window.__whatRustPopupTarget</code> to a URL before loading
+    this page. If it is absent, the harness opens a same-origin test document.
+  </p>
+
+  <button id="open">Open popup</button>
+  <button id="check">Check existing popup</button>
+  <button id="close">Close popup</button>
+  <button id="clear">Clear result</button>
+
+  <pre id="result" aria-live="polite">No test run yet.</pre>
+
+  <script>
+    let popup = null;
+    const result = document.querySelector('#result');
+
+    function report(message, ok = null) {
+      result.textContent = message;
+      result.className = ok === true ? 'pass' : ok === false ? 'fail' : '';
+    }
+
+    function targetUrl() {
+      return window.__whatRustPopupTarget ||
+        `${location.origin}${location.pathname}?popup-child=1`;
+    }
+
+    document.querySelector('#open').addEventListener('click', () => {
+      popup = window.open(targetUrl(), 'whatrust-popup-harness', 'popup=yes,width=420,height=640');
+      const nonNull = popup !== null;
+      report(
+        `window.open() returned ${nonNull ? 'a WindowProxy' : 'null'}\n` +
+        `target: ${targetUrl()}\n` +
+        `expected: non-null when a replacement WebView2 is supplied`,
+        nonNull
+      );
+    });
+
+    document.querySelector('#check').addEventListener('click', () => {
+      if (popup === null) {
+        report('No popup reference is held by the opener.', false);
+        return;
+      }
+      let closed = 'unknown';
+      try { closed = String(popup.closed); } catch (_) { closed = 'unreadable'; }
+      report(`WindowProxy exists. popup.closed = ${closed}`, true);
+    });
+
+    document.querySelector('#close').addEventListener('click', () => {
+      if (!popup) {
+        report('No popup reference to close.', false);
+        return;
+      }
+      try {
+        popup.close();
+        report('close() was sent through the WindowProxy.', true);
+      } catch (error) {
+        report(`close() failed: ${error}`, false);
+      }
+    });
+
+    document.querySelector('#clear').addEventListener('click', () => report('No test run yet.'));
+
+    if (new URLSearchParams(location.search).has('popup-child')) {
+      document.body.insertAdjacentHTML('afterbegin', '<p><strong>Popup child</strong>: this is the window opened by the harness.</p>');
+    }
+  </script>
+</body>
+</html>

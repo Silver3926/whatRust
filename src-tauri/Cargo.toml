@@ -42,6 +42,8 @@ windows = { version = "0.61", features = [
   "Win32_Security",           # SECURITY_ATTRIBUTES (referenced by RegCreateKeyExW)
   "Win32_System_Registry",    # RegCreateKeyExW/RegSetValueExW: register the toast AUMID in HKCU
   "Win32_UI_Shell",           # SetCurrentProcessExplicitAppUserModelID
+  "Win32_UI_WindowsAndMessaging", # EnumWindows/GetClassNameW/SetWindowLongPtrW: detach WebView2 call popups from their owner window
+  "Win32_System_Threading",   # GetCurrentProcessId: only un-own OUR popup windows
 ] }
 windows-core = "0.61"
 # In windows-rs 0.61 IAsyncOperation moved out of windows::Foundation into the
@@ -49,8 +51,7 @@ windows-core = "0.61"
 windows-future = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# macOS < 14 guard for data_store_identifier (per-account isolation). Already at
-# 0.3.2 in Cargo.lock via the dependency graph; the NSProcessInfo feature must be
+# macOS < 14 guard for data_store_identifier. Already at 0.3.2 in Cargo.lock via the dependency graph; the NSProcessInfo feature must be
 # explicit. Inert on Linux/Windows. NSString + NSError added for the Touch ID backend.
 objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString", "NSError"] }
 objc2-local-authentication = { version = "0.3.2", features = ["LAContext", "block2"] }

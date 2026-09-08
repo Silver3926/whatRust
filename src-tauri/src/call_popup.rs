@@ -35,12 +35,14 @@
 //! top-level check), and the Tauri/tao window itself has a different class.
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetClassNameW, GetWindowLongPtrW, GetWindowThreadProcessId,
     IsWindowVisible, SetWindowLongPtrW, GA_ROOT, GWLP_HWNDPARENT,
 };
+// BOOL lives in windows-core in windows-rs 0.61 (moved out of Win32::Foundation).
+use windows_core::BOOL;
 
 /// WebView2/Chromium's window class for the web content host.
 const POPUP_CLASS: PCWSTR = w!("Chrome_WidgetWin_1");

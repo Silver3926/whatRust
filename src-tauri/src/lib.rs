@@ -2,6 +2,8 @@ mod accounts;
 mod applock;
 mod aumid;
 mod biometric;
+#[cfg(target_os = "windows")]
+mod call_popup;
 mod commands;
 mod dlog;
 mod lock;
@@ -127,8 +129,7 @@ pub fn run() {
             dlog::init();
 
             // Windows: register our AppUserModelID so WinRT toast notifications
-            // actually render for the installed app (no-op elsewhere). Must run
-            // before any account window can fire a notification. See aumid.rs.
+            // actually render for the installed app (no-op elsewhere). See aumid.rs.
             aumid::register(handle);
 
             let s = settings::load(handle);
@@ -170,6 +171,14 @@ pub fn run() {
                 lock::show_lock_window(handle);
             }
 
+            // Windows: keep WebView2's call popup (WhatsApp's call window), but
+            // detach it from its owner window, so minimizing the main window no
+            // longer minimizes an ongoing call. Process-global — no wiring into
+            // window creation needed. See call_popup.rs for why the popup itself
+            // must never be intercepted.
+            #[cfg(target_os = "windows")]
+            std::thread::spawn(crate::call_popup::watch);
+
             // Idle auto-lock watcher. Always running; no-op unless the lock is active
             // with idle_secs > 0 and the app is currently unlocked.
             #[cfg(desktop)]
@@ -187,7 +196,15 @@ pub fn run() {
                     let idle_ok = user_idle::UserIdle::get_time()
                         .map(|t| t.as_seconds() >= c.idle_secs as u64)
                         .unwrap_or(false);
-                    if idle_ok {
+                    // A visible call popup means the user is mid-call: idle to
+                    // mouse and keyboard, but absolutely not away. Windows only —
+                    // call popups are WebView2 default popups, detected via Win32
+                    // (see call_popup.rs).
+                    #[cfg(target_os = "windows")]
+                    let call_active = crate::call_popup::call_in_progress();
+                    #[cfg(not(target_os = "windows"))]
+                    let call_active = false;
+                    if idle_ok && !call_active {
                         let h = idle_handle.clone();
                         let _ = idle_handle.run_on_main_thread(move || lock::lock_now(&h));
                     }

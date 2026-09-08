@@ -171,13 +171,23 @@ pub fn run() {
                 lock::show_lock_window(handle);
             }
 
-            // Windows: keep WebView2's call popup (WhatsApp's call window), but
-            // detach it from its owner window, so minimizing the main window no
-            // longer minimizes an ongoing call. Process-global — no wiring into
-            // window creation needed. See call_popup.rs for why the popup itself
-            // must never be intercepted.
+            // EXPERIMENT W: popup watcher temporarily DISABLED to isolate the
+            // call-capability probe failure. Upstream v0.6.3 (no watcher) runs
+            // calls fine on the same machine/account/runtime, while this branch
+            // shows the "Make calls with the Windows app" banner — the only
+            // behavioral delta is this watcher un-owning popup windows, which
+            // also un-owns WhatsApp's own probe popup mid-probe. If calls come
+            // back with the watcher off, the culprit is confirmed and the fix
+            // is v3: spare CoreWebView2 controller + SetNewWindow (never let
+            // the default popup exist at all). If the banner persists, the
+            // culprit is elsewhere (build toolchain / deps) — test a bare
+            // master build next.
             #[cfg(target_os = "windows")]
-            std::thread::spawn(crate::call_popup::watch);
+            const WATCHER_ENABLED: bool = false;
+            #[cfg(target_os = "windows")]
+            if WATCHER_ENABLED {
+                std::thread::spawn(crate::call_popup::watch);
+            }
 
             // Idle auto-lock watcher. Always running; no-op unless the lock is active
             // with idle_secs > 0 and the app is currently unlocked.

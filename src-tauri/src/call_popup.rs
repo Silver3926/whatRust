@@ -110,7 +110,6 @@ fn unown_popups() -> usize {
         }
         unsafe { SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0) };
         detached += 1;
-granted
     }
     detached
 }
